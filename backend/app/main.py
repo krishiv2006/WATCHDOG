@@ -2,6 +2,10 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -23,12 +27,15 @@ logger = logging.getLogger("watchdog")
 # ── Lifespan ───────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Create tables on startup (dev convenience). Production should run:
-        alembic upgrade head
-    """
-    logger.info("Ensuring database tables exist (create_all for dev)...")
-    Base.metadata.create_all(bind=engine)
+    """Ensure schema and runtime state are ready before serving traffic."""
+    alembic_cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    try:
+        logger.info("Running database migrations...")
+        command.upgrade(alembic_cfg, "head")
+    except Exception as exc:  # pragma: no cover - startup safeguard
+        logger.warning("Alembic migration failed during startup: %s", exc)
+        logger.info("Falling back to create_all for legacy/dev databases.")
+        Base.metadata.create_all(bind=engine)
     if settings.ENABLE_SCHEDULER:
         from app.services.scheduler import start_scheduler, shutdown_scheduler
         start_scheduler()
