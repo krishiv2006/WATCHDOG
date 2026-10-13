@@ -22,6 +22,12 @@ export default function Reports() {
   const [selectedModel, setSelectedModel] = useState<string>('')
   const [reportType, setReportType] = useState<string>('drift_analysis')
   const [isGenerating, setIsGenerating] = useState(false)
+  const [dateStart, setDateStart] = useState<string>(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 30)
+    return d.toISOString().slice(0, 10)
+  })
+  const [dateEnd, setDateEnd] = useState<string>(() => new Date().toISOString().slice(0, 10))
 
   const fetchReports = () => {
     api.getReports().then(res => setReports(res as ReportItem[]))
@@ -38,14 +44,11 @@ export default function Reports() {
   const handleGenerate = async () => {
     if (!selectedModel) return
     setIsGenerating(true)
-    const now = new Date()
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-
     try {
       await api.generateReport({
         modelId: selectedModel,
-        dateRangeStart: thirtyDaysAgo.toISOString(),
-        dateRangeEnd: now.toISOString(),
+        dateRangeStart: new Date(dateStart).toISOString(),
+        dateRangeEnd: new Date(dateEnd + 'T23:59:59').toISOString(),
         reportType: reportType,
       })
       fetchReports()
@@ -107,10 +110,22 @@ export default function Reports() {
               </select>
             </div>
             <div>
-              <label className="text-label-md font-semibold text-on-surface-variant block mb-2">Date Range</label>
-              <div className="h-10 px-3 rounded-lg border border-outline-variant bg-surface text-on-surface text-sm flex items-center text-on-surface-variant">
-                Last 30 Days (Rolling)
-              </div>
+              <label className="text-label-md font-semibold text-on-surface-variant block mb-2">Date From</label>
+              <input
+                type="date"
+                value={dateStart}
+                onChange={e => setDateStart(e.target.value)}
+                className="w-full h-10 px-3 rounded-lg border border-outline-variant bg-surface text-on-surface text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+            <div>
+              <label className="text-label-md font-semibold text-on-surface-variant block mb-2">Date To</label>
+              <input
+                type="date"
+                value={dateEnd}
+                onChange={e => setDateEnd(e.target.value)}
+                className="w-full h-10 px-3 rounded-lg border border-outline-variant bg-surface text-on-surface text-sm focus:outline-none focus:border-primary"
+              />
             </div>
           </div>
 

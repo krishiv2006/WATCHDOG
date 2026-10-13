@@ -229,3 +229,46 @@ def upsert_quality_alert(
     db.flush()
     _broadcast({"event": "new_alert", "alert": _alert_dict(alert, model_name)})
     return alert
+
+
+def upsert_performance_alert(
+    db: Session,
+    model_id: str,
+    model_name: str,
+    description: str,
+    metric_value: float | None = None,
+) -> AlertDB:
+    now = utcnow()
+    fingerprint = f"{model_id}:performance:degradation"
+    open_alert = (
+        db.query(AlertDB)
+        .filter(AlertDB.fingerprint == fingerprint, AlertDB.status != "resolved")
+        .first()
+    )
+    title = "Model performance degraded vs baseline"
+    if open_alert:
+        open_alert.last_seen_at = now
+        open_alert.occurrences = (open_alert.occurrences or 1) + 1
+        open_alert.description = description
+        open_alert.metric_value = metric_value
+        db.flush()
+        _broadcast({"event": "alert_updated", "alert": _alert_dict(open_alert, model_name)})
+        return open_alert
+    alert = AlertDB(
+        model_id=model_id,
+        severity="warning",
+        category="performance",
+        title=title,
+        description=description,
+        detected_at=now,
+        status="unacknowledged",
+        fingerprint=fingerprint,
+        first_seen_at=now,
+        last_seen_at=now,
+        occurrences=1,
+        metric_value=metric_value,
+    )
+    db.add(alert)
+    db.flush()
+    _broadcast({"event": "new_alert", "alert": _alert_dict(alert, model_name)})
+    return alert

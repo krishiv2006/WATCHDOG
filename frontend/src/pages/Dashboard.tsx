@@ -7,7 +7,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Progress } from "@/components/ui/progress"
-import { Search, Filter, MoreHorizontal, ArrowUpRight, Plus } from "lucide-react"
+import { Search, MoreHorizontal, Plus } from "lucide-react"
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -18,7 +18,7 @@ export default function Dashboard() {
   const [statusFilter, setStatusFilter] = useState("all")
 
   useEffect(() => {
-    api.getDashboardSummary().then(setData)
+    api.getDashboardSummary(dateFilter).then(setData)
     api.getModels().then(setModels)
   }, [dateFilter])
 
@@ -65,11 +65,16 @@ export default function Dashboard() {
           <CardContent className="p-6">
             <div className="text-label-md font-semibold text-on-surface-variant uppercase mb-2">Model Health</div>
             <div className="flex items-end justify-between">
-              <div className="text-headline-lg font-semibold">{data.healthAvg}/100</div>
-              <Badge variant="stable" className="mb-1">Healthy</Badge>
+              <div className="text-headline-lg font-semibold">{data.healthAvg != null ? `${data.healthAvg}/100` : '—'}</div>
+              <Badge
+                variant={data.healthBadge === 'Healthy' ? 'stable' : data.healthBadge === 'Critical' ? 'critical' : 'warning'}
+                className="mb-1"
+              >
+                {data.healthBadge || 'Unknown'}
+              </Badge>
             </div>
-            <div className="text-sm font-medium text-stable-text flex items-center mt-3 bg-stable-bg/50 w-fit px-2 py-0.5 rounded-full">
-              <ArrowUpRight className="h-3 w-3 mr-1" /> +4.2% ({dateFilter})
+            <div className="text-sm font-medium text-on-surface-variant mt-3">
+              Weighted PSI, performance, and open critical alerts
             </div>
           </CardContent>
         </Card>
@@ -90,10 +95,14 @@ export default function Dashboard() {
             <div className="text-headline-lg font-semibold">
               {data.predictionsTotal >= 1_000_000
                 ? `${(data.predictionsTotal / 1_000_000).toFixed(1)}M`
-                : `${(data.predictionsTotal / 1_000).toFixed(0)}K`}
+                : data.predictionsTotal >= 1000
+                  ? `${(data.predictionsTotal / 1000).toFixed(1)}K`
+                  : data.predictionsTotal}
             </div>
-            <div className="text-sm font-medium text-stable-text flex items-center mt-3 bg-stable-bg/50 w-fit px-2 py-0.5 rounded-full">
-              <ArrowUpRight className="h-3 w-3 mr-1" /> +12.8% ({dateFilter})
+            <div className="text-sm font-medium text-on-surface-variant mt-3">
+              {data.predictionsTrend == null
+                ? `Logged in ${dateFilter}`
+                : `${data.predictionsTrend >= 0 ? '+' : ''}${data.predictionsTrend}% vs prior window`}
             </div>
           </CardContent>
         </Card>
@@ -155,12 +164,13 @@ export default function Dashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data.featureDriftAlerts || [
-                  { feature: 'annual_income', score: '0.31', status: 'critical' },
-                  { feature: 'usage_frequency', score: '0.18', status: 'warning' },
-                  { feature: 'transaction_amt', score: '0.15', status: 'warning' },
-                  { feature: 'login_count', score: '0.08', status: 'stable' },
-                ]).map((item: any, i: number) => (
+                {(data.featureDriftAlerts || []).length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={3} className="text-center py-8 text-sm text-on-surface-variant">
+                      No drift scores in this window. Upload a baseline and send live predictions first.
+                    </TableCell>
+                  </TableRow>
+                ) : (data.featureDriftAlerts || []).map((item: any, i: number) => (
                   <TableRow key={i}>
                     <TableCell className="font-medium text-sm truncate max-w-[120px]" title={item.feature}>{item.feature}</TableCell>
                     <TableCell className="text-right text-sm">{item.score}</TableCell>
@@ -223,7 +233,7 @@ export default function Dashboard() {
                     <div className="text-xs text-on-surface-variant mt-0.5">{model.version}</div>
                   </TableCell>
                   <TableCell className="text-sm">{model.algorithm}</TableCell>
-                  <TableCell className="text-sm">{model.predictionsCount ? (model.predictionsCount / 1000).toFixed(1) + 'k' : 'N/A'}</TableCell>
+                  <TableCell className="text-sm">{model.predictionsCount ? model.predictionsCount.toLocaleString() : '0'}</TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
                        <Progress 

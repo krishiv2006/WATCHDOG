@@ -14,7 +14,7 @@ function Sidebar({ unacknowledgedCount }: { unacknowledgedCount: number }) {
   const location = useLocation()
   const navigation = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'Models', href: '/models/m-1', icon: Database },
+    { name: 'Models', href: '/models', icon: Database },
     { name: 'Drift Analysis', href: '/drift', icon: Activity },
     { name: 'Performance', href: '/performance', icon: TrendingUp },
     { name: 'Alerts', href: '/alerts', icon: Bell, badge: unacknowledgedCount > 0 ? unacknowledgedCount : undefined },

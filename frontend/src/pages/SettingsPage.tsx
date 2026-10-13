@@ -8,10 +8,11 @@ import { Check, Save, Key, Sliders } from 'lucide-react'
 export default function SettingsPage() {
   const [rules, setRules] = useState<any[]>([])
   const [saved, setSaved] = useState(false)
-  const [apiKey, setApiKey] = useState('wd_live_9482049182390148')
+  const [settings, setSettings] = useState<any>(null)
 
   useEffect(() => {
     api.getAlertRules().then(setRules)
+    api.getPublicSettings().then(setSettings)
   }, [])
 
   const handleUpdateRule = async (id: string, warning: number, critical: number, enabled: boolean) => {
@@ -23,14 +24,13 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
         <div>
           <h1 className="text-[32px] font-semibold leading-[40px] tracking-[-0.02em] text-on-surface mb-2">
             Monitoring & Alert Settings
           </h1>
           <p className="text-[16px] leading-[24px] text-on-surface-variant">
-            Configure Population Stability Index thresholds, evaluation schedules, and API access keys.
+            Edit stored alert-rule thresholds. Ingest authentication and scheduler interval come from backend environment variables.
           </p>
         </div>
         {saved && (
@@ -40,14 +40,13 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* Rules Table */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Sliders className="h-5 w-5 text-primary" />
             <div>
               <CardTitle>Threshold Rules Configuration</CardTitle>
-              <CardDescription>System-wide Population Stability Index (PSI) & Latency threshold rules</CardDescription>
+              <CardDescription>Per-rule warning and critical cutoffs used during evaluation</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -63,7 +62,13 @@ export default function SettingsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rules.map((rule) => (
+              {rules.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center py-8 text-sm text-on-surface-variant">
+                    No alert rules yet. Defaults from the backend config are used until you create rules.
+                  </TableCell>
+                </TableRow>
+              ) : rules.map((rule) => (
                 <TableRow key={rule.id}>
                   <TableCell className="font-semibold text-on-surface uppercase text-xs">{rule.metric}</TableCell>
                   <TableCell>
@@ -111,36 +116,33 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* API Key Management */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Key className="h-5 w-5 text-primary" />
             <div>
-              <CardTitle>API Ingestion Security</CardTitle>
-              <CardDescription>Authentication key for submitting live data to the monitoring pipeline</CardDescription>
+              <CardTitle>Ingest authentication</CardTitle>
+              <CardDescription>Configured via INGEST_API_KEY on the backend — this UI cannot rotate the secret</CardDescription>
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-on-surface-variant mb-1">Production API Key</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                readOnly
-                value={apiKey}
-                className="flex-1 h-10 px-3 rounded-lg border border-outline-variant bg-surface text-xs font-mono text-on-surface"
-              />
-              <Button variant="outline" onClick={() => {
-                setApiKey(`wd_live_${Math.random().toString(36).substring(2, 18)}`)
-                setSaved(true)
-                setTimeout(() => setSaved(false), 2000)
-              }}>
-                Rotate Key
-              </Button>
-            </div>
-          </div>
+        <CardContent className="space-y-3 text-sm">
+          <p>
+            Status:{' '}
+            <span className="font-semibold">
+              {settings?.ingestAuthRequired
+                ? `Required (${settings.ingestHeader})`
+                : 'Open (dev) — set INGEST_API_KEY to require a header on ingest'}
+            </span>
+          </p>
+          {settings && (
+            <ul className="text-xs text-on-surface-variant space-y-1">
+              <li>Evaluation window: {settings.evalWindowHours} hours</li>
+              <li>Scheduled drift check: every {settings.driftCheckIntervalMinutes} minutes ({settings.schedulerEnabled ? 'enabled' : 'disabled'})</li>
+              <li>Minimum live samples before scoring: {settings.minSampleSize}</li>
+              <li>Default PSI warning / critical: {settings.psiWarning} / {settings.psiCritical}</li>
+            </ul>
+          )}
         </CardContent>
       </Card>
     </div>

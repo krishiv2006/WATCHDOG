@@ -36,7 +36,11 @@ from app.services.performance import (
     compute_regression_metrics,
     performance_ratio,
 )
-from app.services.alerting import upsert_drift_alert, upsert_quality_alert
+from app.services.alerting import (
+    upsert_drift_alert,
+    upsert_quality_alert,
+    upsert_performance_alert,
+)
 from app.services.quality import volume_anomaly, feature_null_spikes
 
 logger = logging.getLogger(__name__)
@@ -75,6 +79,50 @@ def _live_values(predictions: list[PredictionLog], feature: str) -> list[float]:
             except (ValueError, TypeError):
                 pass
     return vals
+
+
+def _live_raw(predictions: list[PredictionLog], feature: str) -> list:
+    vals = []
+    for pred in predictions:
+        fv = pred.feature_values or {}
+        if feature in fv:
+            vals.append(fv[feature])
+    return vals
+
+
+def _score_categorical(profile: dict, live_raw: list) -> dict:
+    from collections import Counter
+
+    freqs = profile.get("category_frequencies") or {}
+    keys = list(freqs.keys())
+    other_base = int(profile.get("other_count") or 0)
+    baseline_counts = [int(freqs[k]) for k in keys] + [other_base]
+    live_non_null = [str(v) for v in live_raw if v is not None]
+    n_all = len(live_raw)
+    n_live = len(live_non_null)
+    null_live = 1.0 - (n_live / n_all) if n_all else 0.0
+    counter = Counter(live_non_null)
+    live_counts = [counter.get(k, 0) for k in keys]
+    other_live = sum(c for k, c in counter.items() if k not in freqs)
+    live_counts.append(other_live)
+    psi_val = 0.0
+    js_val = 0.0
+    if n_live and any(baseline_counts):
+        psi_val = compute_psi_from_histograms(baseline_counts, live_counts)
+        js_val = compute_js_from_histograms(baseline_counts, live_counts)
+    return {
+        "psi": psi_val,
+        "js": js_val,
+        "n_live": n_live,
+        "n_baseline": int(profile.get("count") or 0),
+        "null_live": null_live,
+        "null_baseline": float(profile.get("null_rate") or 0),
+        "oor": 0.0,
+        "current_mean": None,
+        "current_std": None,
+        "n_buckets": max(len(baseline_counts), 1),
+        "is_constant": bool(profile.get("constant")),
+    }
 
 
 def _score_numeric(profile: dict, live_vals: list[float], n_buckets: int) -> dict:
@@ -185,8 +233,11 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             })
             continue
 
-        live_vals = _live_values(predictions, feature)
-        scored = _score_numeric(profile, live_vals, baseline.n_psi_buckets or 10)
+        if profile.get("feature_type") == "categorical":
+            scored = _score_categorical(profile, _live_raw(predictions, feature))
+        else:
+            live_vals = _live_values(predictions, feature)
+            scored = _score_numeric(profile, live_vals, baseline.n_psi_buckets or 10)
         decision = drift_decision(
             psi=scored["psi"],
             js_distance=scored["js"],
@@ -311,6 +362,11 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             perf_ratio = performance_ratio(m.get("accuracy"), base_perf.get("accuracy"), higher_is_better=True)
             if perf_ratio is not None and perf_ratio < 0.9:
                 snap.perf_status = "degraded"
+                upsert_performance_alert(
+                    db, model.id, model_name,
+                    f"Live accuracy/error is {perf_ratio:.0%} of baseline performance.",
+                    perf_ratio,
+                )
     db.add(snap)
 
     avg_psi = float(np.mean(psi_scores)) if psi_scores else 0.0

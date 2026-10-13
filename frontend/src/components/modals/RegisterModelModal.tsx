@@ -60,7 +60,7 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
             </div>
             <div>
               <h2 className="text-title-lg font-bold text-on-surface">Register & Monitor Model</h2>
-              <p className="text-body-sm text-on-surface-variant">Provide a dataset or details for real-time drift calculation</p>
+              <p className="text-body-sm text-on-surface-variant">Register a model and optionally store a training baseline CSV</p>
             </div>
           </div>
           <button onClick={onClose} className="text-on-surface-variant hover:text-on-surface p-1 rounded-md hover:bg-surface">
@@ -77,7 +77,7 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
               activeTab === 'upload' ? 'bg-surface-lowest text-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'
             }`}
           >
-            ⚡ Live Dataset Driven (CSV Upload)
+            Baseline CSV upload
           </button>
           <button
             type="button"

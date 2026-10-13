@@ -1,14 +1,15 @@
 """Dashboard endpoint — aggregates data across models for the overview page."""
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database import get_db
+from app.config import get_settings
 from app.models import (
     Model as ModelDB, PredictionLog, DriftScore,
-    PerformanceSnapshot, Alert as AlertDB,
+    Alert as AlertDB, utcnow,
 )
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -22,7 +23,7 @@ def get_dashboard_summary(window: str = "30d", db: Session = Depends(get_db)):
     from app.config import get_settings
 
     days = parse_window(window)
-    now = datetime.utcnow()
+    now = utcnow()
     cutoff = now - timedelta(days=days)
     settings = get_settings()
 
@@ -135,4 +136,20 @@ def get_dashboard_summary(window: str = "30d", db: Session = Depends(get_db)):
         },
         "healthOverTime": health_over_time,
         "featureDriftAlerts": feature_drift_alerts,
+    }
+
+
+@router.get("/settings")
+def public_settings():
+    """Non-secret runtime config the UI can display honestly."""
+    s = get_settings()
+    return {
+        "ingestAuthRequired": bool(s.INGEST_API_KEY),
+        "ingestHeader": "X-API-Key",
+        "evalWindowHours": s.EVAL_WINDOW_HOURS,
+        "driftCheckIntervalMinutes": s.DRIFT_CHECK_INTERVAL_MINUTES,
+        "minSampleSize": s.MIN_SAMPLE_SIZE,
+        "psiWarning": s.PSI_THRESHOLD_WARNING,
+        "psiCritical": s.PSI_THRESHOLD_CRITICAL,
+        "schedulerEnabled": s.ENABLE_SCHEDULER,
     }

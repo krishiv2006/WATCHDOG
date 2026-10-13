@@ -19,6 +19,7 @@ from sqlalchemy import func
 
 from app.database import get_db
 from app.config import get_settings
+from app.deps import require_ingest_key
 from app.models import (
     Model as ModelDB, ModelBaseline, BaselineVersion, PredictionLog,
     DriftScore, PerformanceSnapshot, Alert as AlertDB, AlertRule,
@@ -285,12 +286,34 @@ def _build_feature_profile(col_name: str, values: np.ndarray, n_buckets: int = 1
     return profile
 
 
+def _build_categorical_profile(col_name: str, series: pd.Series, top_k: int = 50) -> dict:
+    """Compact category-frequency sketch for PSI on discrete columns."""
+    n = len(series)
+    null_rate = float(series.isna().mean()) if n else 0.0
+    vals = series.dropna().astype(str)
+    counts = vals.value_counts()
+    top = counts.head(top_k)
+    other = int(counts.iloc[top_k:].sum()) if len(counts) > top_k else 0
+    return {
+        "name": col_name,
+        "feature_type": "categorical",
+        "count": int(len(vals)),
+        "null_rate": round(null_rate, 6),
+        "cardinality": int(counts.size),
+        "category_frequencies": {str(k): int(v) for k, v in top.items()},
+        "top_k": [str(x) for x in top.index.tolist()],
+        "other_count": other,
+        "constant": bool(counts.size <= 1),
+    }
+
+
 @router.post("/models/{model_id}/baseline")
 async def upload_baseline(
     model_id: str,
     file: UploadFile = File(...),
     n_buckets: int = Form(10),
     db: Session = Depends(get_db),
+    _: None = Depends(require_ingest_key),
 ):
     """
     Upload a training/validation dataset to create a new BaselineVersion.
@@ -323,14 +346,16 @@ async def upload_baseline(
         "y_true", "y", "index", "timestamp", "date",
     }
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "bool", "category", "string"]).columns.tolist()
     feature_cols = [c for c in numeric_cols if c.lower() not in exclude_lower]
+    cat_feature_cols = [c for c in cat_cols if c.lower() not in exclude_lower]
 
-    if not feature_cols:
-        raise HTTPException(status_code=400, detail="No numeric feature columns found in CSV")
-    if len(feature_cols) > settings.MAX_FEATURES:
+    if not feature_cols and not cat_feature_cols:
+        raise HTTPException(status_code=400, detail="No feature columns found in CSV")
+    if len(feature_cols) + len(cat_feature_cols) > settings.MAX_FEATURES:
         raise HTTPException(
             status_code=400,
-            detail=f"Too many feature columns ({len(feature_cols)}; max {settings.MAX_FEATURES})",
+            detail=f"Too many feature columns ({len(feature_cols) + len(cat_feature_cols)}; max {settings.MAX_FEATURES})",
         )
 
     warnings_list = []
@@ -347,6 +372,16 @@ async def upload_baseline(
         elif profile.get("null_rate", 0) > 0.3:
             warnings_list.append(f"Column '{col}' has {profile['null_rate']*100:.0f}% null values")
 
+        profiles.append(profile)
+
+    for col in cat_feature_cols:
+        profile = _build_categorical_profile(col, df[col])
+        if profile.get("constant"):
+            warnings_list.append(f"Column '{col}' is constant — will be excluded from drift scoring")
+        elif profile.get("cardinality", 0) > 200:
+            warnings_list.append(
+                f"Column '{col}' has high cardinality ({profile['cardinality']}); using top-50 + other bucket"
+            )
         profiles.append(profile)
 
     # Check for prediction/actual columns for baseline performance
@@ -490,6 +525,7 @@ def ingest_predictions(
     model_id: str,
     payload: PredictionBatch,
     db: Session = Depends(get_db),
+    _: None = Depends(require_ingest_key),
 ):
     """
     Ingest single or batch predictions (up to MAX_BATCH_PREDICTIONS).
@@ -581,6 +617,7 @@ def ingest_ground_truth(
     model_id: str,
     payload: GroundTruthBatch,
     db: Session = Depends(get_db),
+    _: None = Depends(require_ingest_key),
 ):
     """
     Submit ground-truth labels for previously logged predictions.
@@ -637,20 +674,21 @@ async def ingest_dataset(
     version: str = Form("v1.0"),
     algorithm: str = Form("XGBoost"),
     environment: str = Form("production"),
-    model_id: str | None = Form(None),
+    provided_model_id: str | None = Form(None, alias="model_id"),
     file: UploadFile = File(None),
     db: Session = Depends(get_db),
+    _: None = Depends(require_ingest_key),
 ):
     """Convenience: create (or reuse) a model and upload the CSV as a training baseline.
 
     Does **not** split the file into fake live data. Send production traffic
     separately via POST /models/{id}/predictions.
     """
-    if model_id:
-        model = db.query(ModelDB).filter(ModelDB.id == model_id).first()
+    if provided_model_id:
+        model = db.query(ModelDB).filter(ModelDB.id == provided_model_id).first()
         if not model:
             model = ModelDB(
-                id=model_id, name=name, version=version,
+                id=provided_model_id, name=name, version=version,
                 algorithm=algorithm, environment=environment,
             )
             db.add(model)
@@ -813,7 +851,7 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
     days = parse_window(window)
     cutoff = _now_utc() - timedelta(days=days)
 
-    baseline = (
+    legacy_perf = (
         db.query(ModelBaseline)
         .filter(
             ModelBaseline.model_id == model_id,
@@ -821,6 +859,8 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
         )
         .first()
     )
+    active_bv = _get_active_baseline(model_id, db)
+    bv_perf = (active_bv.performance_metrics or {}) if active_bv else {}
 
     snapshots = (
         db.query(PerformanceSnapshot)
@@ -834,7 +874,7 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
 
     latest = snapshots[-1] if snapshots else None
 
-    def _metric(label: str, current_val, baseline_val) -> dict:
+    def _metric(label: str, current_val, baseline_val, as_percent: bool = True) -> dict:
         if current_val is None and baseline_val is None:
             return {
                 "label": label,
@@ -843,15 +883,18 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
                 "delta": None,
                 "reason": "awaiting_labels",
             }
-        curr = round(current_val * 100, 1) if current_val is not None else None
-        base = round(baseline_val * 100, 1) if baseline_val is not None else None
-        delta = round((current_val - baseline_val) * 100, 1) if (curr is not None and base is not None) else None
+        scale = 100.0 if as_percent else 1.0
+        curr = round(current_val * scale, 4 if not as_percent else 1) if current_val is not None else None
+        base = round(baseline_val * scale, 4 if not as_percent else 1) if baseline_val is not None else None
+        delta = None
+        if curr is not None and base is not None:
+            delta = round((current_val - baseline_val) * scale, 4 if not as_percent else 1)
         return {"label": label, "value": curr, "baseline": base, "delta": delta}
 
-    base_acc = baseline.accuracy if baseline else None
-    base_prec = baseline.precision_score if baseline else None
-    base_rec = baseline.recall if baseline else None
-    base_f1 = baseline.f1 if baseline else None
+    base_acc = bv_perf.get("accuracy") if bv_perf.get("accuracy") is not None else (legacy_perf.accuracy if legacy_perf else None)
+    base_prec = bv_perf.get("precision") if bv_perf.get("precision") is not None else (legacy_perf.precision_score if legacy_perf else None)
+    base_rec = bv_perf.get("recall") if bv_perf.get("recall") is not None else (legacy_perf.recall if legacy_perf else None)
+    base_f1 = bv_perf.get("f1") if bv_perf.get("f1") is not None else (legacy_perf.f1 if legacy_perf else None)
 
     curr_acc = latest.accuracy if latest else None
     curr_prec = latest.precision_score if latest else None
@@ -870,9 +913,9 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
     else:
         # Regression metrics
         metrics = [
-            _metric("MAE", latest.mae if latest else None, None),
-            _metric("RMSE", latest.rmse if latest else None, None),
-            _metric("R²", latest.r_squared if latest else None, None),
+            _metric("MAE", latest.mae if latest else None, bv_perf.get("mae"), as_percent=False),
+            _metric("RMSE", latest.rmse if latest else None, bv_perf.get("rmse"), as_percent=False),
+            _metric("R²", latest.r_squared if latest else None, bv_perf.get("r2"), as_percent=False),
         ]
 
     time_series = []

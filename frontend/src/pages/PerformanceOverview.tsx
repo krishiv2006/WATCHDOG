@@ -2,14 +2,11 @@ import { useState, useEffect } from 'react'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { TrendingUp, ArrowDown, ArrowUpRight, Activity } from 'lucide-react'
 
 export default function PerformanceOverview() {
   const [models, setModels] = useState<any[]>([])
   const [perfMap, setPerfMap] = useState<Record<string, any>>({})
-  const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
     api.getModels().then(async (modelList) => {
@@ -24,7 +21,6 @@ export default function PerformanceOverview() {
         }
       }
       setPerfMap(results)
-      setIsLoading(false)
     })
   }, [])
 
@@ -46,8 +42,6 @@ export default function PerformanceOverview() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {models.map((m) => {
           const perf = perfMap[m.id]
-          const accMetric = perf?.metrics.find((x: any) => x.label === 'Accuracy')
-          const f1Metric = perf?.metrics.find((x: any) => x.label === 'F1 Score')
 
           return (
             <Card key={m.id} className="flex flex-col">

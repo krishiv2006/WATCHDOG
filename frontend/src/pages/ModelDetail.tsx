@@ -8,15 +8,35 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { RefreshCw, ArrowDown, Minus, Loader2 } from "lucide-react"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import type { Model, DriftScore } from "@/types"
+import type { Model } from "@/types"
+
+interface DriftRow {
+  featureName: string
+  baselineMean: number | null
+  currentMean: number | null
+  driftScore: number | null
+  jsDistance?: number | null
+  ksStatistic?: number | null
+  ksPvalue?: number | null
+  status: 'critical' | 'warning' | 'stable' | 'insufficient_data'
+  confidence?: string | null
+  reason?: string | null
+  nLive?: number | null
+  nBaseline?: number | null
+  outOfRangeRate?: number | null
+  timestamp?: string | null
+}
 
 export default function ModelDetail() {
   const { id } = useParams()
   const [model, setModel] = useState<Model | null>(null)
-  const [drift, setDrift] = useState<DriftScore[]>([])
+  const [drift, setDrift] = useState<DriftRow[]>([])
   const [performance, setPerformance] = useState<{
-    metrics: Array<{ label: string; value: number; baseline: number; delta: number }>
-    timeSeries: Array<{ time: string; current: number; base: number }>
+    metrics: Array<{ label: string; value: number | null; baseline: number | null; delta: number | null; reason?: string }>
+    timeSeries: Array<{ time: string; current: number | null; base: number | null }>
+    hasLabels: boolean
+    labelCoverage: number | null
+    taskType: string | null
   } | null>(null)
   const [isReevaluating, setIsReevaluating] = useState(false)
 
@@ -144,16 +164,22 @@ export default function ModelDetail() {
                     drift.map((row) => (
                       <TableRow key={row.featureName}>
                         <TableCell className="font-semibold text-on-surface">{row.featureName}</TableCell>
-                        <TableCell>{row.baselineMean.toLocaleString()}</TableCell>
-                        <TableCell>{row.currentMean.toLocaleString()}</TableCell>
-                        <TableCell className="font-semibold">{row.driftScore.toFixed(4)}</TableCell>
+                        <TableCell>{row.baselineMean != null ? row.baselineMean.toLocaleString() : '—'}</TableCell>
+                        <TableCell>{row.currentMean != null ? row.currentMean.toLocaleString() : '—'}</TableCell>
+                        <TableCell className="font-semibold">{row.driftScore != null ? row.driftScore.toFixed(4) : '—'}</TableCell>
                         <TableCell className="text-on-surface-variant">
-                          {row.jsDistance !== undefined ? row.jsDistance.toFixed(4) : 'N/A'}
+                          {row.jsDistance != null ? row.jsDistance.toFixed(4) : '—'}
                         </TableCell>
                         <TableCell>
                           {row.status === 'stable' && <Badge variant="stable">Stable</Badge>}
                           {row.status === 'warning' && <Badge variant="warning">Warning</Badge>}
                           {row.status === 'critical' && <Badge variant="critical">Critical</Badge>}
+                          {row.status === 'insufficient_data' && (
+                            <Badge variant="outline" className="text-on-surface-variant border-outline-variant">Insufficient Data</Badge>
+                          )}
+                          {row.reason && row.status === 'insufficient_data' && (
+                            <div className="text-[10px] text-on-surface-variant mt-0.5 max-w-[200px] truncate" title={row.reason}>{row.reason}</div>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))
@@ -166,24 +192,38 @@ export default function ModelDetail() {
 
         {/* Performance Tab */}
         <TabsContent value="performance" className="space-y-6">
+          {!performance?.hasLabels && (
+            <div className="p-4 rounded-lg border border-outline-variant bg-surface text-sm text-on-surface-variant">
+              ⏳ Awaiting ground-truth labels — send labels via <code className="text-xs bg-surface-low px-1 rounded">POST /api/models/{'{id}'}/ground-truth</code> to see performance metrics.
+              {performance?.labelCoverage != null && (
+                <span className="ml-2 font-semibold">Label coverage: {(performance.labelCoverage * 100).toFixed(1)}%</span>
+              )}
+            </div>
+          )}
           {/* Metrics Grid */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             {performance?.metrics.map((m) => (
               <Card key={m.label}>
                 <CardContent className="p-6">
                   <div className="text-label-md font-semibold text-on-surface-variant uppercase mb-2">{m.label}</div>
-                  <div className="flex items-end justify-between">
-                    <div className="text-headline-lg font-semibold">{m.value}%</div>
-                    <div className="text-xs text-on-surface-variant mb-1">Base: {m.baseline}%</div>
-                  </div>
-                  <div className={`text-xs font-semibold flex items-center mt-3 w-fit px-2 py-0.5 rounded-full ${
-                    m.delta >= 0
-                      ? 'bg-stable-bg/50 text-stable-text'
-                      : 'bg-critical-bg/50 text-critical-text'
-                  }`}>
-                    {m.delta < 0 ? <ArrowDown className="h-3 w-3 mr-1" /> : <Minus className="h-3 w-3 mr-1" />}
-                    {m.delta}%
-                  </div>
+                  {m.value == null ? (
+                    <div className="text-sm text-on-surface-variant italic">{m.reason ?? 'awaiting_labels'}</div>
+                  ) : (
+                    <>
+                      <div className="flex items-end justify-between">
+                        <div className="text-headline-lg font-semibold">{m.value}%</div>
+                        <div className="text-xs text-on-surface-variant mb-1">Base: {m.baseline ?? '—'}%</div>
+                      </div>
+                      {m.delta != null && (
+                        <div className={`text-xs font-semibold flex items-center mt-3 w-fit px-2 py-0.5 rounded-full ${
+                          m.delta >= 0 ? 'bg-stable-bg/50 text-stable-text' : 'bg-critical-bg/50 text-critical-text'
+                        }`}>
+                          {m.delta < 0 ? <ArrowDown className="h-3 w-3 mr-1" /> : <Minus className="h-3 w-3 mr-1" />}
+                          {m.delta}%
+                        </div>
+                      )}
+                    </>
+                  )}
                 </CardContent>
               </Card>
             ))}

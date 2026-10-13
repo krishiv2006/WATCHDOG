@@ -100,9 +100,11 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
           <CardContent className="p-6">
             <div className="text-label-md font-semibold text-on-surface-variant uppercase mb-1">Highest Drift Feature</div>
             <div className="text-title-lg font-bold text-error">
-              {driftScores[0] ? `${driftScores[0].featureName} (${driftScores[0].driftScore})` : 'None'}
+              {driftScores[0]
+                ? `${driftScores[0].featureName} (${driftScores[0].driftScore ?? 'n/a'})`
+                : 'None'}
             </div>
-            <div className="text-xs text-on-surface-variant mt-1">Status: {driftScores[0]?.status.toUpperCase() || 'STABLE'}</div>
+            <div className="text-xs text-on-surface-variant mt-1">Status: {driftScores[0]?.status?.toUpperCase() || 'N/A'}</div>
           </CardContent>
         </Card>
       </div>
@@ -153,10 +155,10 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
                 driftScores.map((row) => (
                   <TableRow key={row.featureName}>
                     <TableCell className="font-semibold text-on-surface">{row.featureName}</TableCell>
-                    <TableCell>{row.baselineMean.toLocaleString()}</TableCell>
-                    <TableCell>{row.currentMean.toLocaleString()}</TableCell>
-                    <TableCell className="font-mono font-semibold">{row.driftScore.toFixed(4)}</TableCell>
-                    <TableCell className="font-mono text-on-surface-variant">{row.jsDistance?.toFixed(4) || 'N/A'}</TableCell>
+                    <TableCell>{row.baselineMean != null ? Number(row.baselineMean).toLocaleString() : '—'}</TableCell>
+                    <TableCell>{row.currentMean != null ? Number(row.currentMean).toLocaleString() : '—'}</TableCell>
+                    <TableCell className="font-mono font-semibold">{row.driftScore != null ? Number(row.driftScore).toFixed(4) : '—'}</TableCell>
+                    <TableCell className="font-mono text-on-surface-variant">{row.jsDistance != null ? Number(row.jsDistance).toFixed(4) : 'N/A'}</TableCell>
                     <TableCell>
                       <Badge variant={row.status as any} className="uppercase leading-none py-1 text-[10px]">
                         {row.status}

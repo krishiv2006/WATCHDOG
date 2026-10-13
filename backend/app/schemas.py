@@ -30,7 +30,7 @@ class ModelCreate(BaseModel):
     label_delay_hint: Optional[str] = Field(None, alias="labelDelayHint")
     training_data_ref: Optional[str] = Field(None, alias="trainingDataRef")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class ModelOut(BaseModel):
@@ -49,7 +49,7 @@ class ModelOut(BaseModel):
     last_updated: str = Field("", alias="lastUpdated")
     training_data_ref: Optional[str] = Field(None, alias="trainingDataRef")
 
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, protected_namespaces=())
 
 
 class ModelSummary(BaseModel):
@@ -64,7 +64,7 @@ class ModelSummary(BaseModel):
     drift_status: str = Field("Low", alias="driftStatus")
     last_updated: str = Field("", alias="lastUpdated")
 
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, protected_namespaces=())
 
 
 # ── Dashboard schemas ──────────────────────────────
@@ -103,7 +103,7 @@ class DashboardSummary(BaseModel):
         default_factory=list, alias="featureDriftAlerts"
     )
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 # ── Baseline schemas ──────────────────────────────
@@ -120,7 +120,7 @@ class BaselineVersionOut(BaseModel):
     feature_count: int = Field(0, alias="featureCount")
     created_at: Optional[str] = Field(None, alias="createdAt")
 
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, protected_namespaces=())
 
 
 # ── Drift schemas ──────────────────────────────────
@@ -144,7 +144,7 @@ class DriftScoreOut(BaseModel):
     out_of_range_rate: Optional[float] = Field(None, alias="outOfRangeRate")
     timestamp: Optional[str] = None
 
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, protected_namespaces=())
 
 
 class DriftDecisionOut(BaseModel):
@@ -164,7 +164,7 @@ class DriftDecisionOut(BaseModel):
     null_rate_baseline: Optional[float] = Field(None, alias="nullRateBaseline")
     null_rate_live: Optional[float] = Field(None, alias="nullRateLive")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 # ── Performance schemas ────────────────────────────
@@ -192,7 +192,7 @@ class PerformanceOut(BaseModel):
     label_coverage: Optional[float] = Field(None, alias="labelCoverage")
     task_type: Optional[str] = Field(None, alias="taskType")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 # ── Prediction ingestion schemas ───────────────────
@@ -209,7 +209,7 @@ class PredictionInput(BaseModel):
     latency_ms: Optional[float] = Field(None, alias="latencyMs")
     model_version: Optional[str] = Field(None, alias="modelVersion")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class PredictionBatch(BaseModel):
@@ -232,7 +232,7 @@ class GroundTruthInput(BaseModel):
     actual_value: float = Field(alias="actualValue")
     labeled_at: Optional[str] = Field(None, alias="labeledAt")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class GroundTruthBatch(BaseModel):
@@ -265,7 +265,7 @@ class AlertOut(BaseModel):
     auto_resolved: Optional[bool] = Field(None, alias="autoResolved")
     metric_value: Optional[float] = Field(None, alias="metricValue")
 
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, protected_namespaces=())
 
 
 class AlertUpdate(BaseModel):
@@ -279,7 +279,7 @@ class PaginatedAlerts(BaseModel):
     per_page: int = Field(alias="perPage")
     total_pages: int = Field(alias="totalPages")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 # ── Alert Rule schemas ─────────────────────────────
@@ -298,7 +298,7 @@ class AlertRuleBase(BaseModel):
     cooldown_minutes: Optional[int] = Field(60, alias="cooldownMinutes")
     channels: Optional[list[str]] = None
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class AlertRuleCreate(BaseModel):
@@ -313,7 +313,7 @@ class AlertRuleCreate(BaseModel):
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class AlertRuleUpdate(BaseModel):
@@ -324,7 +324,7 @@ class AlertRuleUpdate(BaseModel):
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class AlertRuleOut(BaseModel):
@@ -340,7 +340,7 @@ class AlertRuleOut(BaseModel):
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
 
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True, protected_namespaces=())
 
 
 # ── Report schemas ─────────────────────────────────
@@ -353,6 +353,8 @@ class ReportCreate(BaseModel):
     report_type: str = "drift_analysis"
     format: str = "csv"
 
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
+
 
 class ReportOut(BaseModel):
     id: str
@@ -364,7 +366,7 @@ class ReportOut(BaseModel):
     generated_at: Optional[str] = Field(None, alias="generatedAt")
     format: Optional[str] = None
 
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True, protected_namespaces=())
 
 
 # ── Health score schema ────────────────────────────

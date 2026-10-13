@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AppShell } from './components/shared/AppShell'
 import Dashboard from './pages/Dashboard'
+import ModelsList from './pages/ModelsList'
 import ModelDetail from './pages/ModelDetail'
 import AlertCenter from './pages/AlertCenter'
 import Reports from './pages/Reports'
@@ -14,6 +15,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/models" element={<ModelsList />} />
         <Route path="/models/:id" element={<ModelDetail />} />
         <Route path="/drift" element={<DriftAnalysis />} />
         <Route path="/performance" element={<PerformanceOverview />} />

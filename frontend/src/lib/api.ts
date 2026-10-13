@@ -2,25 +2,55 @@ import type { Model, Alert, DriftScore } from '@/types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
 const WS_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000/ws/alerts'
+const INGEST_API_KEY = import.meta.env.VITE_INGEST_API_KEY as string | undefined
+
+function ingestHeaders(extra?: HeadersInit): HeadersInit {
+  const headers = new Headers(extra)
+  if (INGEST_API_KEY) headers.set('X-API-Key', INGEST_API_KEY)
+  return headers
+}
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options)
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`)
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail)
   }
   return res.json()
 }
 
 export const api = {
-  getDashboardSummary: async () => {
+  getDashboardSummary: async (window: string = '30d') => {
     return fetchJson<{
-      healthAvg: number
+      healthAvg: number | null
+      healthBadge: string
+      healthTrend: number | null
       activeModels: { total: number; prod: number; staging: number }
       predictionsTotal: number
+      predictionsTrend: number | null
       activeAlerts: { total: number; critical: number; warning: number }
-      healthOverTime: Array<{ time: string; value: number }>
+      healthOverTime: Array<{ time: string; value: number | null }>
       featureDriftAlerts: Array<{ feature: string; score: string; status: 'stable' | 'warning' | 'critical' }>
-    }>(`${BASE_URL}/dashboard/summary`)
+    }>(`${BASE_URL}/dashboard/summary?window=${window}`)
+  },
+
+  getPublicSettings: async () => {
+    return fetchJson<{
+      ingestAuthRequired: boolean
+      ingestHeader: string
+      evalWindowHours: number
+      driftCheckIntervalMinutes: number
+      minSampleSize: number
+      psiWarning: number
+      psiCritical: number
+      schedulerEnabled: boolean
+    }>(`${BASE_URL}/settings`)
   },
 
   getModels: async () => {
@@ -37,8 +67,12 @@ export const api = {
 
   getModelPerformance: async (id: string, window: string = '30d') => {
     return fetchJson<{
-      metrics: Array<{ label: string; value: number; baseline: number; delta: number }>
-      timeSeries: Array<{ time: string; current: number; base: number }>
+      metrics: Array<{ label: string; value: number | null; baseline: number | null; delta: number | null; reason?: string }>
+      timeSeries: Array<{ time: string; current: number | null; base: number | null }>
+      hasLabels: boolean
+      sampleSize: number
+      labelCoverage: number | null
+      taskType: string | null
     }>(`${BASE_URL}/models/${id}/performance?window=${window}`)
   },
 
@@ -107,9 +141,17 @@ export const api = {
     const res = await fetch(`${BASE_URL}/models/ingest-dataset`, {
       method: 'POST',
       body: formData,
+      headers: ingestHeaders(),
     })
     if (!res.ok) {
-      throw new Error(`Failed to ingest dataset: ${res.statusText}`)
+      let detail = res.statusText
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
     }
     return res.json()
   },

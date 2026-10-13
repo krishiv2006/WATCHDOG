@@ -46,6 +46,11 @@ class Base(DeclarativeBase):
     pass
 
 
+# Import all ORM models so the metadata is populated before tests or startup
+# call Base.metadata.create_all().
+import app.models  # noqa: F401
+
+
 def get_db():
     db = SessionLocal()
     try:
