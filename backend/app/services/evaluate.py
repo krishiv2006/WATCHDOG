@@ -1,0 +1,349 @@
+"""Evaluate a model against its active BaselineVersion using stored sketches.
+
+Does not reconstruct synthetic baseline samples. PSI uses stored quantile
+bucket counts; JS uses the stored fine histogram edges.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+import numpy as np
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.config import get_settings
+from app.models import (
+    Model as ModelDB,
+    BaselineVersion,
+    PredictionLog,
+    DriftScore,
+    PerformanceSnapshot,
+    Alert as AlertDB,
+    utcnow,
+)
+from app.services.drift import (
+    compute_psi_from_quantile_edges,
+    compute_psi_from_histograms,
+    compute_js_from_histograms,
+    drift_decision,
+    compute_health_score,
+    _clean,
+)
+from app.services.performance import (
+    compute_classification_metrics,
+    compute_regression_metrics,
+    performance_ratio,
+)
+from app.services.alerting import upsert_drift_alert, upsert_quality_alert
+from app.services.quality import volume_anomaly, feature_null_spikes
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+def _get_thresholds(model_id: str, metric: str, db: Session) -> tuple[float, float]:
+    from app.models import AlertRule
+
+    rule = (
+        db.query(AlertRule)
+        .filter(AlertRule.model_id == model_id, AlertRule.metric == metric, AlertRule.enabled == True)  # noqa: E712
+        .first()
+    )
+    if rule:
+        return rule.threshold_warning, rule.threshold_critical
+    global_rule = (
+        db.query(AlertRule)
+        .filter(AlertRule.model_id.is_(None), AlertRule.metric == metric, AlertRule.enabled == True)  # noqa: E712
+        .first()
+    )
+    if global_rule:
+        return global_rule.threshold_warning, global_rule.threshold_critical
+    if metric == "js_distance":
+        return settings.JS_THRESHOLD_WARNING, settings.JS_THRESHOLD_CRITICAL
+    return settings.PSI_THRESHOLD_WARNING, settings.PSI_THRESHOLD_CRITICAL
+
+
+def _live_values(predictions: list[PredictionLog], feature: str) -> list[float]:
+    vals = []
+    for pred in predictions:
+        fv = pred.feature_values or {}
+        if feature in fv and fv[feature] is not None:
+            try:
+                vals.append(float(fv[feature]))
+            except (ValueError, TypeError):
+                pass
+    return vals
+
+
+def _score_numeric(profile: dict, live_vals: list[float], n_buckets: int) -> dict:
+    live_arr, null_live = _clean(np.asarray(live_vals, dtype=float), profile["name"])
+    n_live = int(len(live_arr))
+    n_baseline = int(profile.get("count") or 0)
+    b_min = profile.get("min")
+    b_max = profile.get("max")
+    oor = 0.0
+    if n_live and b_min is not None and b_max is not None:
+        oor = float(((live_arr < b_min) | (live_arr > b_max)).mean())
+
+    psi_val = 0.0
+    edges = profile.get("quantile_edges") or []
+    q_counts = profile.get("quantile_counts")
+    if edges and q_counts:
+        psi_val = compute_psi_from_quantile_edges(live_arr, np.array(edges), np.array(q_counts))
+    elif profile.get("histogram_counts") and profile.get("histogram_edges"):
+        hist_edges = np.array(profile["histogram_edges"])
+        live_counts, _ = np.histogram(live_arr, bins=hist_edges)
+        # Count out-of-range into outer bins
+        live_counts = live_counts.astype(float)
+        below = int(np.sum(live_arr < hist_edges[0])) if n_live else 0
+        above = int(np.sum(live_arr > hist_edges[-1])) if n_live else 0
+        if len(live_counts):
+            live_counts[0] += below
+            live_counts[-1] += above
+        psi_val = compute_psi_from_histograms(profile["histogram_counts"], live_counts.tolist())
+
+    js_val = 0.0
+    if profile.get("histogram_counts") and profile.get("histogram_edges") and n_live:
+        hist_edges = np.array(profile["histogram_edges"])
+        live_hist, _ = np.histogram(live_arr, bins=hist_edges)
+        js_val = compute_js_from_histograms(profile["histogram_counts"], live_hist.tolist())
+
+    return {
+        "psi": psi_val,
+        "js": js_val,
+        "n_live": n_live,
+        "n_baseline": n_baseline,
+        "null_live": null_live,
+        "null_baseline": float(profile.get("null_rate") or 0),
+        "oor": oor,
+        "current_mean": float(live_arr.mean()) if n_live else None,
+        "current_std": float(live_arr.std()) if n_live > 1 else None,
+        "n_buckets": n_buckets if not edges else len(edges) + 1,
+        "is_constant": bool(profile.get("constant")),
+    }
+
+
+def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None) -> dict:
+    """Run drift + performance + quality for one model. Persists scores and alerts."""
+    now = utcnow()
+    hours = window_hours or settings.EVAL_WINDOW_HOURS
+    baseline = (
+        db.query(BaselineVersion)
+        .filter(BaselineVersion.model_id == model.id, BaselineVersion.is_active == True)  # noqa: E712
+        .first()
+    )
+    if not baseline:
+        model.last_evaluated_at = now
+        db.commit()
+        return {
+            "status": "no_baseline",
+            "message": "No baseline found for this model. Upload a baseline first.",
+            "model_id": model.id,
+        }
+
+    cutoff = now - timedelta(hours=hours)
+    # Never mix predictions from before this baseline was created
+    if baseline.created_at:
+        bl_created = baseline.created_at
+        if bl_created.tzinfo is None:
+            bl_created = bl_created.replace(tzinfo=cutoff.tzinfo)
+        cutoff = max(cutoff, bl_created)
+
+    predictions = (
+        db.query(PredictionLog)
+        .filter(PredictionLog.model_id == model.id, PredictionLog.timestamp >= cutoff)
+        .order_by(PredictionLog.timestamp.desc())
+        .limit(settings.MAX_BATCH_PREDICTIONS)
+        .all()
+    )
+    if not predictions:
+        model.last_evaluated_at = now
+        db.commit()
+        return {
+            "status": "no_predictions",
+            "message": "No recent predictions found to evaluate against.",
+            "model_id": model.id,
+        }
+
+    psi_warn, psi_crit = _get_thresholds(model.id, "psi", db)
+    js_warn, js_crit = _get_thresholds(model.id, "js_distance", db)
+    model_name = f"{model.name} {model.version}"
+    computed = []
+    psi_scores: list[float] = []
+
+    for profile in baseline.feature_profiles or []:
+        feature = profile["name"]
+        if profile.get("constant"):
+            computed.append({
+                "featureName": feature,
+                "status": "insufficient_data",
+                "reason": "Constant baseline column — drift undefined.",
+                "driftScore": None,
+                "jsDistance": None,
+            })
+            continue
+
+        live_vals = _live_values(predictions, feature)
+        scored = _score_numeric(profile, live_vals, baseline.n_psi_buckets or 10)
+        decision = drift_decision(
+            psi=scored["psi"],
+            js_distance=scored["js"],
+            n_live=scored["n_live"],
+            n_baseline=scored["n_baseline"],
+            n_buckets=scored["n_buckets"],
+            psi_warning=psi_warn,
+            psi_critical=psi_crit,
+            js_warning=js_warn,
+            js_critical=js_crit,
+            min_sample_size=settings.MIN_SAMPLE_SIZE,
+            is_constant=scored["is_constant"],
+        )
+        if scored["n_live"] > 0:
+            psi_scores.append(scored["psi"])
+
+        rec = DriftScore(
+            model_id=model.id,
+            feature_name=feature,
+            timestamp=now,
+            psi_score=round(scored["psi"], 4),
+            js_distance=round(scored["js"], 4),
+            baseline_mean=profile.get("mean"),
+            current_mean=round(scored["current_mean"], 4) if scored["current_mean"] is not None else None,
+            baseline_std=profile.get("std"),
+            current_std=round(scored["current_std"], 4) if scored["current_std"] is not None else None,
+            n_live=scored["n_live"],
+            n_baseline=scored["n_baseline"],
+            null_rate_baseline=scored["null_baseline"],
+            null_rate_live=round(scored["null_live"], 4),
+            out_of_range_rate=round(scored["oor"], 4),
+            status=decision.status,
+            confidence=decision.confidence,
+            reason=decision.reason,
+            baseline_version_id=baseline.id,
+        )
+        db.add(rec)
+        computed.append({
+            "featureName": feature,
+            "status": decision.status,
+            "confidence": decision.confidence,
+            "reason": decision.reason,
+            "driftScore": round(scored["psi"], 4),
+            "jsDistance": round(scored["js"], 4),
+            "nLive": scored["n_live"],
+            "nBaseline": scored["n_baseline"],
+            "outOfRangeRate": round(scored["oor"], 4),
+        })
+        upsert_drift_alert(
+            db,
+            model.id,
+            model_name,
+            feature,
+            decision.status,
+            scored["psi"],
+            scored["js"],
+            scored["n_live"],
+            decision.reason,
+            profile.get("mean"),
+            scored["current_mean"],
+        )
+
+    # Volume anomaly
+    vol = volume_anomaly(db, model.id, window_hours=hours)
+    if vol:
+        upsert_quality_alert(
+            db, model.id, model_name, "volume",
+            "Input Volume Anomaly",
+            f"Last window ingested {vol['current']} predictions vs rolling average {vol['expected']}.",
+            vol["ratio"],
+        )
+
+    spikes = feature_null_spikes(predictions, baseline)
+    for sp in spikes:
+        upsert_quality_alert(
+            db, model.id, model_name, f"null:{sp['feature']}",
+            f"Null-rate spike: {sp['feature']}",
+            f"Live null rate {sp['liveNullRate']} vs baseline {sp['baselineNullRate']}.",
+            sp["liveNullRate"],
+        )
+
+    # Performance from labels only
+    labeled = [p for p in predictions if p.actual_value is not None and p.predicted_value is not None]
+    n_pred = len(predictions)
+    n_lab = len(labeled)
+    coverage = n_lab / n_pred if n_pred else 0.0
+    perf_ratio = None
+    snap = PerformanceSnapshot(
+        model_id=model.id,
+        timestamp=now,
+        sample_size=n_pred,
+        n_labeled=n_lab,
+        label_coverage=round(coverage, 4),
+        perf_status="awaiting_labels",
+    )
+    min_labels = settings.MIN_LABELS
+    if n_lab >= min_labels:
+        y_true = np.array([p.actual_value for p in labeled], dtype=float)
+        y_pred = np.array([p.predicted_value for p in labeled], dtype=float)
+        scores = np.array([p.score if p.score is not None else p.predicted_value for p in labeled], dtype=float)
+        task = model.task_type or "binary_classification"
+        if task == "regression":
+            m = compute_regression_metrics(y_true, y_pred)
+            snap.mae = m.get("mae")
+            snap.rmse = m.get("rmse")
+            snap.r_squared = m.get("r2")
+            snap.perf_status = "healthy"
+            base_perf = (baseline.performance_metrics or {})
+            perf_ratio = performance_ratio(m.get("rmse"), base_perf.get("rmse"), higher_is_better=False)
+        else:
+            m = compute_classification_metrics(
+                np.round(y_true), np.round(y_pred), scores,
+                multiclass=(task == "multiclass"),
+            )
+            snap.accuracy = m.get("accuracy")
+            snap.precision_score = m.get("precision")
+            snap.recall = m.get("recall")
+            snap.f1 = m.get("f1")
+            snap.auc = m.get("auc")
+            snap.perf_status = "healthy"
+            base_perf = (baseline.performance_metrics or {})
+            perf_ratio = performance_ratio(m.get("accuracy"), base_perf.get("accuracy"), higher_is_better=True)
+            if perf_ratio is not None and perf_ratio < 0.9:
+                snap.perf_status = "degraded"
+    db.add(snap)
+
+    avg_psi = float(np.mean(psi_scores)) if psi_scores else 0.0
+    open_crits = (
+        db.query(func.count(AlertDB.id))
+        .filter(AlertDB.model_id == model.id, AlertDB.severity == "critical", AlertDB.status != "resolved")
+        .scalar()
+        or 0
+    )
+    health = compute_health_score(
+        avg_psi=avg_psi,
+        open_critical_alerts=open_crits,
+        psi_warning=psi_warn,
+        psi_critical=psi_crit,
+        performance_ratio=perf_ratio,
+        weight_drift=settings.HEALTH_WEIGHT_DRIFT,
+        weight_perf=settings.HEALTH_WEIGHT_PERFORMANCE,
+        weight_alerts=settings.HEALTH_WEIGHT_ALERTS,
+        alert_penalty=settings.HEALTH_ALERT_PENALTY,
+    )
+    model.health_score = health.score
+    model.last_evaluated_at = now
+    db.commit()
+    return {
+        "status": "completed",
+        "model_id": model.id,
+        "evaluatedAt": now.isoformat(),
+        "healthScore": health.score,
+        "healthComponents": health.components,
+        "drifts": computed,
+        "nPredictions": n_pred,
+        "nLabeled": n_lab,
+        "labelCoverage": round(coverage, 4),
+        "baselineVersion": baseline.version_number,
+        "perfStatus": snap.perf_status,
+    }

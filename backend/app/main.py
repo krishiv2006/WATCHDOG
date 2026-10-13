@@ -23,11 +23,20 @@ logger = logging.getLogger("watchdog")
 # ── Lifespan ───────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables on startup (idempotent)."""
-    logger.info("Creating database tables (if not exist)...")
+    """
+    Create tables on startup (dev convenience). Production should run:
+        alembic upgrade head
+    """
+    logger.info("Ensuring database tables exist (create_all for dev)...")
     Base.metadata.create_all(bind=engine)
+    if settings.ENABLE_SCHEDULER:
+        from app.services.scheduler import start_scheduler, shutdown_scheduler
+        start_scheduler()
     logger.info("Watchdog AI backend ready.")
     yield
+    if settings.ENABLE_SCHEDULER:
+        from app.services.scheduler import shutdown_scheduler
+        shutdown_scheduler()
     logger.info("Shutting down Watchdog AI backend.")
 
 
@@ -35,7 +44,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Watchdog AI",
     description="ML model monitoring service — detects data drift, prediction drift, and performance degradation.",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -45,7 +54,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -64,9 +73,7 @@ async def websocket_alerts(websocket: WebSocket):
     logger.info(f"WebSocket client connected. Total: {len(ws_manager.active_connections)}")
     try:
         while True:
-            # Keep connection alive, listen for client messages (pings)
             data = await websocket.receive_text()
-            # Echo back or handle keepalive
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
@@ -74,7 +81,31 @@ async def websocket_alerts(websocket: WebSocket):
         logger.info(f"WebSocket client disconnected. Total: {len(ws_manager.active_connections)}")
 
 
-# ── Health check ──────────────────────────────────
+# ── Health / readiness ─────────────────────────────
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "watchdog-ai"}
+    return {"status": "healthy", "service": "watchdog-ai", "version": "2.0.0"}
+
+
+@app.get("/ready")
+def readiness():
+    from sqlalchemy import text
+    from app.database import SessionLocal
+    from app.services import scheduler as sched_mod
+
+    db_ok = False
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        db_ok = True
+    except Exception as exc:
+        logger.warning("Readiness DB check failed: %s", exc)
+    sched_ok = (not settings.ENABLE_SCHEDULER) or (sched_mod._scheduler is not None)
+    status = "ready" if db_ok and sched_ok else "degraded"
+    code = 200 if db_ok else 503
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=code,
+        content={"status": status, "database": db_ok, "scheduler": sched_ok},
+    )

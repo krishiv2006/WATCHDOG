@@ -1,7 +1,7 @@
 """Alert endpoints — list, filter, paginate, update status."""
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -17,7 +17,10 @@ router = APIRouter(prefix="/api", tags=["alerts"])
 def _format_time_ago(dt: datetime) -> str:
     if not dt:
         return "N/A"
-    delta = datetime.utcnow() - dt
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = now - dt
     if delta.total_seconds() < 60:
         return f"{int(delta.total_seconds())} secs ago"
     if delta.total_seconds() < 3600:
@@ -41,6 +44,12 @@ def _alert_to_dict(alert: AlertDB, db: Session) -> dict:
         "description": alert.description,
         "detectedAt": _format_time_ago(alert.detected_at),
         "status": alert.status,
+        "fingerprint": alert.fingerprint,
+        "occurrences": alert.occurrences,
+        "firstSeenAt": alert.first_seen_at.isoformat() if alert.first_seen_at else None,
+        "lastSeenAt": alert.last_seen_at.isoformat() if alert.last_seen_at else None,
+        "autoResolved": alert.auto_resolved,
+        "metricValue": alert.metric_value,
     }
 
 
@@ -56,7 +65,9 @@ def list_alerts(
     """Paginated alert list with optional filters."""
     query = db.query(AlertDB)
 
-    if status:
+    if status == "active":
+        query = query.filter(AlertDB.status != "resolved")
+    elif status:
         query = query.filter(AlertDB.status == status)
     if severity:
         query = query.filter(AlertDB.severity == severity)
@@ -88,12 +99,11 @@ async def update_alert(alert_id: str, payload: AlertUpdate, db: Session = Depend
 
     alert.status = payload.status
     if payload.status == "resolved":
-        alert.resolved_at = datetime.utcnow()
+        alert.resolved_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(alert)
 
-    # Broadcast update over WebSocket
     alert_data = _alert_to_dict(alert, db)
     await ws_manager.broadcast({
         "event": "alert_updated",
