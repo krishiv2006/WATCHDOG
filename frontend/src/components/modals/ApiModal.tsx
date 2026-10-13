@@ -1,4 +1,4 @@
-import { X, Code2, ExternalLink, Server, Check } from 'lucide-react'
+import { X, Code2, ExternalLink, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useState } from 'react'
 

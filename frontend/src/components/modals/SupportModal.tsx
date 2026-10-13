@@ -1,4 +1,4 @@
-import { X, HelpCircle, LifeBuoy, MessageSquare, Mail, FileQuestion } from 'lucide-react'
+import { X, LifeBuoy, MessageSquare, Mail, FileQuestion } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface Props {

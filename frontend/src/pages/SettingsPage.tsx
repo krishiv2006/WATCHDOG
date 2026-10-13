@@ -3,7 +3,7 @@ import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Settings, Shield, Bell, Check, Save, Key, Sliders } from 'lucide-react'
+import { Check, Save, Key, Sliders } from 'lucide-react'
 
 export default function SettingsPage() {
   const [rules, setRules] = useState<any[]>([])

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { X, User, LogOut, Check, ShieldCheck, Mail, Key } from 'lucide-react'
+import { useState } from 'react'
+import { X, LogOut, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface Props {
