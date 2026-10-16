@@ -137,23 +137,29 @@ export const api = {
     window.open(`${BASE_URL}/reports/${id}/download`, '_blank')
   },
 
-  ingestDataset: async (formData: FormData) => {
-    const res = await fetch(`${BASE_URL}/models/ingest-dataset`, {
+  createModel: async (payload: { name: string; version: string; algorithm: string; environment: string }) => {
+    return fetchJson<{ id: string; name: string; status: string }>(`${BASE_URL}/models`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+
+  uploadBaseline: async (id: string, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return fetchJson<{
+      status: string
+      baselineVersionId: string
+      versionNumber: number
+      featureCount: number
+      sampleSize: number
+      warnings: string[]
+    }>(`${BASE_URL}/models/${id}/baseline`, {
       method: 'POST',
       body: formData,
       headers: ingestHeaders(),
     })
-    if (!res.ok) {
-      let detail = res.statusText
-      try {
-        const body = await res.json()
-        if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    }
-    return res.json()
   },
 
   getAlertRules: async () => {

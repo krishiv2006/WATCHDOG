@@ -90,6 +90,31 @@ def consecutive_flagged(
     return all(r.status in ("warning", "critical") for r in rows)
 
 
+def auto_resolve_alert(
+    db: Session,
+    model_id: str,
+    fingerprint: str,
+    model_name: str,
+) -> AlertDB | None:
+    """Resolve an open alert when its triggering condition is no longer present."""
+    alert = (
+        db.query(AlertDB)
+        .filter(AlertDB.model_id == model_id, AlertDB.fingerprint == fingerprint,
+                AlertDB.status != "resolved")
+        .first()
+    )
+    if not alert:
+        return None
+    now = utcnow()
+    alert.status = "resolved"
+    alert.resolved_at = now
+    alert.last_seen_at = now
+    alert.auto_resolved = True
+    db.flush()
+    _broadcast({"event": "alert_updated", "alert": _alert_dict(alert, model_name)})
+    return alert
+
+
 def upsert_drift_alert(
     db: Session,
     model_id: str,

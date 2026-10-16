@@ -1,0 +1,29 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Databases and generated runtime data
+*.db
+*.sqlite
+*.sqlite3
+reports_output/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Frontend build and local configuration
+frontend/dist/
+frontend/node_modules/
+frontend/.env.local
+
+# Logs
+*.log
+seed_out.txt

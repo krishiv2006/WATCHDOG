@@ -53,13 +53,15 @@ export function DocsModal({ isOpen, onClose }: Props) {
 
           <div className="p-4 bg-surface rounded-lg border border-outline-variant space-y-2">
             <h3 className="font-semibold text-primary flex items-center gap-2">
-              <Code className="h-4 w-4" /> Real-time Live Dataset Ingestion API
+              <Code className="h-4 w-4" />               Training Baseline and Live Prediction APIs
             </h3>
             <pre className="bg-background text-on-surface p-3 rounded text-xs overflow-x-auto border border-outline-variant font-mono">
-{`curl -X POST "http://localhost:8000/api/models/ingest-dataset" \\
-  -F "name=Fraud Classifier" \\
-  -F "version=v1.0" \\
-  -F "file=@production_data.csv"`}
+{`curl -X POST "http://localhost:8000/api/models/{id}/baseline" \\
+  -F "file=@training_data.csv"
+
+curl -X POST "http://localhost:8000/api/models/{id}/predictions" \\
+  -H "Content-Type: application/json" \\
+  -d '{"predictionId":"pred-1","features":{"age":35},"prediction":1}'`}
             </pre>
           </div>
         </div>

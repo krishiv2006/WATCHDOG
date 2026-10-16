@@ -14,7 +14,9 @@ export function ApiModal({ isOpen, onClose }: Props) {
   const endpoints = [
     { method: 'GET', path: '/api/dashboard/summary', desc: 'Fetch overall dashboard health & metrics' },
     { method: 'GET', path: '/api/models', desc: 'List all registered ML models & statuses' },
-    { method: 'POST', path: '/api/models/ingest-dataset', desc: 'Ingest live CSV dataset for instant real-time drift analysis' },
+    { method: 'POST', path: '/api/models/{id}/baseline', desc: 'Upload a training CSV and create an immutable baseline version' },
+    { method: 'POST', path: '/api/models/{id}/predictions', desc: 'Ingest single or batch production predictions idempotently' },
+    { method: 'POST', path: '/api/models/{id}/ground-truth', desc: 'Attach delayed labels to previously ingested predictions' },
     { method: 'GET', path: '/api/models/{id}/drift', desc: 'Get feature-level PSI and JS distance scores' },
     { method: 'GET', path: '/api/models/{id}/performance', desc: 'Get model accuracy degradation over time' },
     { method: 'GET', path: '/api/alerts', desc: 'Fetch paginated alerts with status and severity filters' },

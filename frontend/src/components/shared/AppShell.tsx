@@ -244,7 +244,7 @@ function Topbar({
           onClick={onOpenAccount}
           className="h-8 w-8 rounded-full bg-primary text-on-primary flex flex-col items-center justify-center font-bold text-xs ring-2 ring-primary/20 hover:scale-105 transition-transform"
         >
-          {user ? user.initials : 'JS'}
+          {user?.initials || <User className="h-4 w-4" aria-label="Account" />}
         </button>
       </div>
     </div>

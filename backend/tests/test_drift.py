@@ -330,6 +330,32 @@ class TestDriftDecision:
         assert d.status == "stable"
         assert d.confidence == "low"
 
+    def test_threshold_boundaries_are_inclusive(self):
+        warning = self._decide(
+            psi=0.1,
+            js=0.05,
+            n_live=1000,
+            n_baseline=100000,
+            psi_warning=0.1,
+            psi_critical=0.25,
+            js_warning=0.05,
+            js_critical=0.15,
+            min_sample_size=250,
+        )
+        critical = self._decide(
+            psi=0.25,
+            js=0.15,
+            n_live=1000,
+            n_baseline=100000,
+            psi_warning=0.1,
+            psi_critical=0.25,
+            js_warning=0.05,
+            js_critical=0.15,
+            min_sample_size=250,
+        )
+        assert warning.status == "warning"
+        assert critical.status == "critical"
+
     def test_stable_psi_stays_stable(self):
         """Low PSI → stable regardless of JS."""
         d = self._decide(
@@ -432,6 +458,11 @@ class TestComputeHealthScore:
         hs = compute_health_score(avg_psi=0.1, open_critical_alerts=1, performance_ratio=0.9)
         total_weight = sum(c["weight"] for c in hs.components.values())
         assert abs(total_weight - 1.0) < 1e-9
+        assert all(
+            0.0 <= component["normalized"] <= 1.0
+            for component in hs.components.values()
+            if component["normalized"] is not None
+        )
 
     def test_components_sum_weights_no_labels(self):
         """Without labels, performance weight redistributed to drift."""

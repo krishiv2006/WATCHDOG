@@ -16,7 +16,7 @@ export function SupportModal({ isOpen, onClose }: Props) {
     },
     {
       q: 'How can I connect a live production stream?',
-      a: 'Send prediction payload events or CSV files to /api/models/ingest-dataset. The system processes distributions and updates metrics in real time.'
+      a: 'Upload training data to /api/models/{id}/baseline, then send production prediction events to /api/models/{id}/predictions. Delayed labels can be joined through /api/models/{id}/ground-truth.'
     },
     {
       q: 'What triggers automated alert notifications?',

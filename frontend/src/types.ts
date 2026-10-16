@@ -25,9 +25,12 @@ export interface Alert {
 
 export interface DriftScore {
   featureName: string
-  baselineMean: number
-  currentMean: number
-  driftScore: number
-  jsDistance?: number
-  status: 'critical' | 'warning' | 'stable'
+  baselineMean: number | null
+  currentMean: number | null
+  driftScore: number | null
+  jsDistance: number | null
+  nLive: number | null
+  nBaseline?: number | null
+  reason?: string | null
+  status: 'critical' | 'warning' | 'stable' | 'insufficient_data'
 }

@@ -20,8 +20,11 @@ def _rule_to_dict(rule: AlertRule) -> dict:
         "thresholdCritical": rule.threshold_critical,
         "enabled": rule.enabled,
         "featureName": rule.feature_name,
+        "comparison": rule.comparison,
+        "minSamples": rule.min_samples,
         "consecutiveWindows": rule.consecutive_windows,
         "cooldownMinutes": rule.cooldown_minutes,
+        "channels": rule.channels,
     }
 
 
@@ -47,8 +50,11 @@ def create_alert_rule(payload: AlertRuleCreate, db: Session = Depends(get_db)):
         threshold_critical=payload.threshold_critical,
         enabled=payload.enabled,
         feature_name=payload.feature_name,
+        comparison=payload.comparison,
+        min_samples=payload.min_samples,
         consecutive_windows=payload.consecutive_windows,
         cooldown_minutes=payload.cooldown_minutes,
+        channels=payload.channels,
     )
     db.add(rule)
     db.commit()

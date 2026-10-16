@@ -31,7 +31,7 @@ from app.schemas import (
 )
 from app.services.drift import (
     compute_psi, compute_psi_from_histograms,
-    compute_js_distance, compute_ks_test,
+    compute_js_from_histograms, compute_ks_test,
     drift_decision, compute_health_score, psi_to_status,
 )
 from app.ws_manager import ws_manager
@@ -240,14 +240,24 @@ def _build_feature_profile(col_name: str, values: np.ndarray, n_buckets: int = 1
     if len(clean) == 0:
         return {
             "name": col_name,
+            "type": "numeric",
             "feature_type": "numeric",
             "count": len(values),
             "null_rate": null_rate,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+            "quantile_edges": [],
+            "quantile_counts": [],
+            "histogram_counts": [],
+            "histogram_edges": [],
             "constant": True,
         }
 
     profile: dict = {
         "name": col_name,
+        "type": "numeric",
         "feature_type": "numeric",
         "count": int(len(clean)),
         "null_rate": round(null_rate, 6),
@@ -259,6 +269,11 @@ def _build_feature_profile(col_name: str, values: np.ndarray, n_buckets: int = 1
         profile["max"] = float(clean[0])
         profile["mean"] = float(clean[0])
         profile["std"] = 0.0
+        profile["quantile_edges"] = []
+        profile["quantile_counts"] = [int(len(clean))]
+        hist_counts, hist_edges = np.histogram(clean, bins=1)
+        profile["histogram_counts"] = [int(x) for x in hist_counts]
+        profile["histogram_edges"] = [float(x) for x in hist_edges]
         return profile
 
     profile["min"] = float(np.min(clean))
@@ -296,9 +311,18 @@ def _build_categorical_profile(col_name: str, series: pd.Series, top_k: int = 50
     other = int(counts.iloc[top_k:].sum()) if len(counts) > top_k else 0
     return {
         "name": col_name,
+        "type": "categorical",
         "feature_type": "categorical",
         "count": int(len(vals)),
         "null_rate": round(null_rate, 6),
+        "min": None,
+        "max": None,
+        "mean": None,
+        "std": None,
+        "quantile_edges": [],
+        "quantile_counts": [],
+        "histogram_counts": [],
+        "histogram_edges": [],
         "cardinality": int(counts.size),
         "category_frequencies": {str(k): int(v) for k, v in top.items()},
         "top_k": [str(x) for x in top.index.tolist()],
@@ -384,51 +408,8 @@ async def upload_baseline(
             )
         profiles.append(profile)
 
-    # Check for prediction/actual columns for baseline performance
-    pred_col = next(
-        (c for c in df.columns if c.lower() in ("predicted_value", "prediction", "predict", "y_pred")),
-        None,
-    )
-    act_col = next(
-        (c for c in df.columns if c.lower() in ("actual_value", "actual", "target", "label", "y_true", "y")),
-        None,
-    )
-
     perf_metrics = None
     pred_dist = None
-    if pred_col and act_col:
-        try:
-            preds = pd.to_numeric(df[pred_col], errors="coerce")
-            actuals = pd.to_numeric(df[act_col], errors="coerce")
-            valid = preds.notna() & actuals.notna()
-            n_valid = int(valid.sum())
-            if n_valid > 0:
-                task = model.task_type or "binary_classification"
-                if task in ("binary_classification", "multiclass"):
-                    acc = float((preds[valid].round() == actuals[valid].round()).mean())
-                    perf_metrics = {"accuracy": round(acc, 4), "sample_size": n_valid}
-                else:
-                    # Regression
-                    residuals = actuals[valid] - preds[valid]
-                    mae = float(residuals.abs().mean())
-                    rmse = float(np.sqrt((residuals**2).mean()))
-                    ss_res = float((residuals**2).sum())
-                    ss_tot = float(((actuals[valid] - actuals[valid].mean())**2).sum())
-                    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-                    perf_metrics = {"mae": round(mae, 4), "rmse": round(rmse, 4), "r2": round(r2, 4), "sample_size": n_valid}
-        except Exception:
-            warnings_list.append("Could not compute baseline performance from prediction/actual columns")
-
-    if pred_col:
-        try:
-            pred_vals = pd.to_numeric(df[pred_col], errors="coerce").dropna().values
-            hist_c, hist_e = np.histogram(pred_vals, bins=20)
-            pred_dist = {
-                "histogram_counts": [int(x) for x in hist_c],
-                "histogram_edges": [float(x) for x in hist_e],
-            }
-        except Exception:
-            pass
 
     # Deactivate previous baseline versions
     db.query(BaselineVersion).filter(
@@ -523,7 +504,7 @@ def list_baselines(model_id: str, db: Session = Depends(get_db)):
 @router.post("/models/{model_id}/predictions")
 def ingest_predictions(
     model_id: str,
-    payload: PredictionBatch,
+    payload: PredictionBatch | PredictionInput,
     db: Session = Depends(get_db),
     _: None = Depends(require_ingest_key),
 ):
@@ -536,10 +517,11 @@ def ingest_predictions(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    if len(payload.predictions) > settings.MAX_BATCH_PREDICTIONS:
+    predictions = payload.predictions if isinstance(payload, PredictionBatch) else [payload]
+    if len(predictions) > settings.MAX_BATCH_PREDICTIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Batch too large: {len(payload.predictions)} predictions (max {settings.MAX_BATCH_PREDICTIONS})",
+            detail=f"Batch too large: {len(predictions)} predictions (max {settings.MAX_BATCH_PREDICTIONS})",
         )
 
     now = _now_utc()
@@ -548,7 +530,7 @@ def ingest_predictions(
     warnings_list = []
 
     # Collect existing prediction_ids for dedup
-    pred_ids_in_batch = [p.prediction_id for p in payload.predictions if p.prediction_id]
+    pred_ids_in_batch = [p.prediction_id for p in predictions if p.prediction_id]
     existing_ids = set()
     if pred_ids_in_batch:
         existing = (
@@ -566,11 +548,14 @@ def ingest_predictions(
 
     baseline = _get_active_baseline(model_id, db)
     records = []
-    for p in payload.predictions:
+    seen_ids: set[str] = set()
+    for p in predictions:
         # Idempotency check
-        if p.prediction_id and p.prediction_id in existing_ids:
+        if p.prediction_id and (p.prediction_id in existing_ids or p.prediction_id in seen_ids):
             duplicates += 1
             continue
+        if p.prediction_id:
+            seen_ids.add(p.prediction_id)
         for w in schema_warnings(p.features or {}, baseline):
             if w not in warnings_list:
                 warnings_list.append(w)
@@ -670,74 +655,17 @@ def ingest_ground_truth(
 
 @router.post("/models/ingest-dataset")
 async def ingest_dataset(
-    name: str = Form("New Live Model"),
-    version: str = Form("v1.0"),
-    algorithm: str = Form("XGBoost"),
-    environment: str = Form("production"),
-    provided_model_id: str | None = Form(None, alias="model_id"),
-    file: UploadFile = File(None),
-    db: Session = Depends(get_db),
     _: None = Depends(require_ingest_key),
 ):
-    """Convenience: create (or reuse) a model and upload the CSV as a training baseline.
-
-    Does **not** split the file into fake live data. Send production traffic
-    separately via POST /models/{id}/predictions.
-    """
-    if provided_model_id:
-        model = db.query(ModelDB).filter(ModelDB.id == provided_model_id).first()
-        if not model:
-            model = ModelDB(
-                id=provided_model_id, name=name, version=version,
-                algorithm=algorithm, environment=environment,
-            )
-            db.add(model)
-    else:
-        model = ModelDB(name=name, version=version, algorithm=algorithm, environment=environment)
-        db.add(model)
-    db.commit()
-    db.refresh(model)
-
-    if not file or not file.filename:
-        return {
-            "status": "success",
-            "message": f"Model '{model.name}' registered without a baseline.",
-            "model": {
-                "id": model.id,
-                "name": model.name,
-                "version": model.version,
-                "algorithm": model.algorithm,
-                "environment": model.environment,
-                "healthScore": model.health_score,
-                "status": model.status,
-                "driftStatus": "Low",
-            },
-            "drifts": [],
-        }
-
-    result = await upload_baseline(model_id=model.id, file=file, n_buckets=10, db=db)
-    return {
-        "status": "success",
-        "message": (
-            f"Registered '{model.name}' and stored baseline version "
-            f"{result.get('versionNumber')} from '{file.filename}'. "
-            "Send live predictions to POST /api/models/{id}/predictions."
+    """Reject the removed combined dataset ingestion flow."""
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "This endpoint was removed. Register a model, upload its training CSV "
+            "to /api/models/{id}/baseline, then send live predictions to "
+            "/api/models/{id}/predictions."
         ),
-        "model": {
-            "id": model.id,
-            "name": model.name,
-            "version": model.version,
-            "algorithm": model.algorithm,
-            "environment": model.environment,
-            "healthScore": model.health_score,
-            "status": model.status,
-            "driftStatus": "Low",
-            "hasBaseline": True,
-            "baselineVersionId": result.get("baselineVersionId"),
-        },
-        "baseline": result,
-        "drifts": [],
-    }
+    )
 
 
 # ── Drift endpoints ─────────────────────────────────────────────────────────
@@ -753,26 +681,23 @@ def get_model_drift(model_id: str, window: str = "30d", db: Session = Depends(ge
     days = parse_window(window)
     cutoff = _now_utc() - timedelta(days=days)
 
-    latest_ts_sq = (
-        db.query(
-            DriftScore.feature_name,
-            func.max(DriftScore.timestamp).label("max_ts"),
-        )
-        .filter(DriftScore.model_id == model_id, DriftScore.timestamp >= cutoff)
-        .group_by(DriftScore.feature_name)
-        .subquery()
-    )
-
-    drifts = (
+    candidates = (
         db.query(DriftScore)
-        .join(
-            latest_ts_sq,
-            (DriftScore.feature_name == latest_ts_sq.c.feature_name)
-            & (DriftScore.timestamp == latest_ts_sq.c.max_ts),
+        .filter(DriftScore.model_id == model_id, DriftScore.timestamp >= cutoff)
+        .order_by(
+            DriftScore.feature_name,
+            DriftScore.timestamp.desc(),
+            DriftScore.id.desc(),
         )
-        .filter(DriftScore.model_id == model_id)
-        .order_by(DriftScore.psi_score.desc())
         .all()
+    )
+    latest_by_feature: dict[str, DriftScore] = {}
+    for score in candidates:
+        latest_by_feature.setdefault(score.feature_name, score)
+    drifts = sorted(
+        latest_by_feature.values(),
+        key=lambda score: score.psi_score if score.psi_score is not None else -1,
+        reverse=True,
     )
 
     return [
@@ -851,17 +776,6 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
     days = parse_window(window)
     cutoff = _now_utc() - timedelta(days=days)
 
-    legacy_perf = (
-        db.query(ModelBaseline)
-        .filter(
-            ModelBaseline.model_id == model_id,
-            ModelBaseline.feature_name == "__performance__",
-        )
-        .first()
-    )
-    active_bv = _get_active_baseline(model_id, db)
-    bv_perf = (active_bv.performance_metrics or {}) if active_bv else {}
-
     snapshots = (
         db.query(PerformanceSnapshot)
         .filter(
@@ -891,10 +805,7 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
             delta = round((current_val - baseline_val) * scale, 4 if not as_percent else 1)
         return {"label": label, "value": curr, "baseline": base, "delta": delta}
 
-    base_acc = bv_perf.get("accuracy") if bv_perf.get("accuracy") is not None else (legacy_perf.accuracy if legacy_perf else None)
-    base_prec = bv_perf.get("precision") if bv_perf.get("precision") is not None else (legacy_perf.precision_score if legacy_perf else None)
-    base_rec = bv_perf.get("recall") if bv_perf.get("recall") is not None else (legacy_perf.recall if legacy_perf else None)
-    base_f1 = bv_perf.get("f1") if bv_perf.get("f1") is not None else (legacy_perf.f1 if legacy_perf else None)
+    base_acc = base_prec = base_rec = base_f1 = None
 
     curr_acc = latest.accuracy if latest else None
     curr_prec = latest.precision_score if latest else None
@@ -913,9 +824,9 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
     else:
         # Regression metrics
         metrics = [
-            _metric("MAE", latest.mae if latest else None, bv_perf.get("mae"), as_percent=False),
-            _metric("RMSE", latest.rmse if latest else None, bv_perf.get("rmse"), as_percent=False),
-            _metric("R²", latest.r_squared if latest else None, bv_perf.get("r2"), as_percent=False),
+            _metric("MAE", latest.mae if latest else None, None, as_percent=False),
+            _metric("RMSE", latest.rmse if latest else None, None, as_percent=False),
+            _metric("R²", latest.r_squared if latest else None, None, as_percent=False),
         ]
 
     time_series = []
@@ -930,7 +841,7 @@ def get_model_performance(model_id: str, window: str = "30d", db: Session = Depe
     return {
         "metrics": metrics,
         "timeSeries": time_series,
-        "hasLabels": latest is not None,
+        "hasLabels": bool(latest and latest.n_labeled),
         "sampleSize": latest.sample_size if latest else 0,
         "labelCoverage": latest.label_coverage if latest else None,
         "taskType": task_type,
@@ -952,9 +863,7 @@ def reevaluate_model(model_id: str, db: Session = Depends(get_db)):
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    active_baseline = _get_active_baseline(model_id, db)
-    if active_baseline:
-        return evaluate_model(model, db)
+    return evaluate_model(model, db)
 
     now = _now_utc()
 
@@ -992,7 +901,7 @@ def reevaluate_model(model_id: str, db: Session = Depends(get_db)):
         }
 
     psi_warn, psi_crit = _get_thresholds(model_id, "psi", db)
-    js_warn, js_crit = settings.JS_THRESHOLD_WARNING, settings.JS_THRESHOLD_CRITICAL
+    js_warn, js_crit = _get_thresholds(model_id, "js_distance", db)
 
     computed_drifts = []
     psi_scores: list[float] = []
@@ -1031,14 +940,33 @@ def reevaluate_model(model_id: str, db: Session = Depends(get_db)):
                 live_counts[-1] += (total_live - live_counts.sum())
             psi_val = compute_psi_from_histograms(bl.histogram_counts, live_counts.tolist())
 
-        js_val = compute_js_distance(
-            baseline=np.array([bl.mean] * 100 if bl.mean is not None else [0.0]),
-            current=live_arr,
+        if not bl.histogram_counts:
+            computed_drifts.append({
+                "featureName": feature,
+                "status": "insufficient_data",
+                "reason": "Baseline distribution is unavailable for PSI and JS distance.",
+                "driftScore": None,
+                "jsDistance": None,
+                "nLive": len(live_vals),
+            })
+            continue
+
+        if sum(bl.histogram_counts) <= 0:
+            computed_drifts.append({
+                "featureName": feature,
+                "status": "insufficient_data",
+                "reason": "Baseline distribution is empty for PSI and JS distance.",
+                "driftScore": None,
+                "jsDistance": None,
+                "nLive": len(live_vals),
+            })
+            continue
+
+        js_val = compute_js_from_histograms(
+            bl.histogram_counts,
+            live_counts.tolist(),
         )
-        ks_stat, ks_p = compute_ks_test(
-            np.array([bl.mean] * 100 if bl.mean is not None else [0.0]),
-            live_arr,
-        )
+        ks_stat, ks_p = None, None
 
         decision = drift_decision(
             psi=psi_val,

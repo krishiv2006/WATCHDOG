@@ -33,14 +33,18 @@ import numpy as np
 from scipy.spatial.distance import jensenshannon
 from scipy.stats import ks_2samp
 
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # ── Default thresholds (overridden via config / AlertRule) ──────────────────
-DEFAULT_PSI_WARNING: float = 0.1
-DEFAULT_PSI_CRITICAL: float = 0.25
-DEFAULT_JS_WARNING: float = 0.05   # JS distance [0,1]
-DEFAULT_JS_CRITICAL: float = 0.15
-DEFAULT_MIN_SAMPLE_SIZE: int = 250
+DEFAULT_PSI_WARNING: float = settings.PSI_THRESHOLD_WARNING
+DEFAULT_PSI_CRITICAL: float = settings.PSI_THRESHOLD_CRITICAL
+DEFAULT_JS_WARNING: float = settings.JS_THRESHOLD_WARNING
+DEFAULT_JS_CRITICAL: float = settings.JS_THRESHOLD_CRITICAL
+DEFAULT_MIN_SAMPLE_SIZE: int = settings.MIN_SAMPLE_SIZE
+MIN_BUCKET_PROPORTION: float = 1e-4
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────
@@ -72,7 +76,7 @@ def _clean(arr: np.ndarray, label: str = "") -> tuple[np.ndarray, float]:
 
 def _psi_smoothed(b_counts: np.ndarray, c_counts: np.ndarray) -> float:
     """
-    PSI with additive smoothing (0.5 pseudo-count per bucket).
+    PSI with a minimum proportion floor for every bucket.
 
     Parameters
     ----------
@@ -83,15 +87,19 @@ def _psi_smoothed(b_counts: np.ndarray, c_counts: np.ndarray) -> float:
     -------
     PSI score ≥ 0  (finite for all inputs with at least 1 bucket)
     """
-    b = b_counts.astype(float) + 0.5
-    c = c_counts.astype(float) + 0.5
+    b = b_counts.astype(float)
+    c = c_counts.astype(float)
+    if b.size == 0 or c.size == 0 or b.sum() <= 0 or c.sum() <= 0:
+        return 0.0
 
-    b_pct = b / b.sum()
-    c_pct = c / c.sum()
+    b_pct = np.maximum(b / b.sum(), MIN_BUCKET_PROPORTION)
+    c_pct = np.maximum(c / c.sum(), MIN_BUCKET_PROPORTION)
+    b_pct /= b_pct.sum()
+    c_pct /= c_pct.sum()
 
     # PSI = Σ (c% - b%) * ln(c% / b%)
     psi = float(np.sum((c_pct - b_pct) * np.log(c_pct / b_pct)))
-    return max(0.0, psi)   # numerical guard (can be tiny negative)
+    return max(0.0, psi) if math.isfinite(psi) else 0.0
 
 
 def _psi_noise_floor(n_baseline: int, n_live: int, n_buckets: int) -> float:
@@ -145,13 +153,8 @@ def compute_psi(
     # Open-ended outer edges
     edges = np.concatenate([[-np.inf], interior_edges, [np.inf]])
 
-    # np.digitize maps each value to a bucket index (1-indexed)
-    b_buckets = np.digitize(baseline_arr, interior_edges)   # 0 … n_buckets-1
-    c_buckets = np.digitize(current_arr, interior_edges)
-
-    n_actual_buckets = len(interior_edges) + 1  # may be < n_buckets if baseline has ties
-    b_counts = np.bincount(b_buckets, minlength=n_actual_buckets)[:n_actual_buckets]
-    c_counts = np.bincount(c_buckets, minlength=n_actual_buckets)[:n_actual_buckets]
+    b_counts, _ = np.histogram(baseline_arr, bins=edges)
+    c_counts, _ = np.histogram(current_arr, bins=edges)
 
     psi = _psi_smoothed(b_counts, c_counts)
     return psi, null_b, null_c
@@ -297,7 +300,7 @@ def drift_decision(
     psi: float,
     js_distance: float,
     n_live: int,
-    n_baseline: int,
+    n_baseline: int = 0,
     n_buckets: int = 10,
     psi_warning: float = DEFAULT_PSI_WARNING,
     psi_critical: float = DEFAULT_PSI_CRITICAL,
@@ -375,9 +378,9 @@ def drift_decision(
         )
 
     # ── 4. PSI-based candidate status ──────────────────────────────────────
-    if psi > psi_critical:
+    if psi >= psi_critical:
         psi_status = "critical"
-    elif psi > psi_warning:
+    elif psi >= psi_warning:
         psi_status = "warning"
     else:
         psi_status = "stable"
@@ -397,7 +400,7 @@ def drift_decision(
     ks_disagrees = ks_p is not None and ks_p > 0.05
 
     if psi_status == "critical":
-        js_agrees = js_distance > js_critical and not ks_disagrees
+        js_agrees = js_distance >= js_critical and not ks_disagrees
         if js_agrees:
             status = "critical"
             confidence = "high"
@@ -414,7 +417,7 @@ def drift_decision(
                 f"< {js_critical:.2f} — downgraded to warning pending more data."
             )
     else:  # psi_status == "warning"
-        js_agrees = js_distance > js_warning and not ks_disagrees
+        js_agrees = js_distance >= js_warning and not ks_disagrees
         if js_agrees:
             status = "warning"
             confidence = "high"
@@ -500,14 +503,15 @@ def compute_health_score(
     weight_alerts        : weight for alerts component (default 0.2)
     alert_penalty        : points subtracted per open critical alert
     """
-    # Normalise PSI: 0 PSI → 1.0 drift_ok; PSI at critical → 0.0
-    normalised_psi = min(avg_psi / max(psi_critical, 1e-9), 1.0)
-    drift_component = round((1.0 - normalised_psi) * 100, 1)
-
-    alert_component = round(max(0.0, 100.0 - open_critical_alerts * alert_penalty), 1)
+    # Keep all component values in [0, 1]. The public score remains [0, 100].
+    normalised_psi = min(max(avg_psi, 0.0) / max(psi_critical, 1e-9), 1.0)
+    drift_component = round(1.0 - normalised_psi, 4)
+    alert_component = round(
+        max(0.0, 1.0 - (open_critical_alerts * alert_penalty / 100.0)), 4
+    )
 
     if performance_ratio is not None:
-        perf_component = round(min(performance_ratio, 1.0) * 100, 1)
+        perf_component = round(max(0.0, min(performance_ratio, 1.0)), 4)
         # All three components active
         raw = (
             weight_drift * drift_component
@@ -515,9 +519,21 @@ def compute_health_score(
             + weight_alerts * alert_component
         )
         components = {
-            "drift": {"value": drift_component, "weight": weight_drift},
-            "performance": {"value": perf_component, "weight": weight_perf},
-            "alerts": {"value": alert_component, "weight": weight_alerts},
+            "drift": {
+                "value": round(drift_component * 100, 1),
+                "normalized": drift_component,
+                "weight": weight_drift,
+            },
+            "performance": {
+                "value": round(perf_component * 100, 1),
+                "normalized": perf_component,
+                "weight": weight_perf,
+            },
+            "alerts": {
+                "value": round(alert_component * 100, 1),
+                "normalized": alert_component,
+                "weight": weight_alerts,
+            },
         }
     else:
         # No labels: redistribute performance weight to drift
@@ -527,12 +543,25 @@ def compute_health_score(
             + weight_alerts * alert_component
         )
         components = {
-            "drift": {"value": drift_component, "weight": effective_drift_weight},
-            "performance": {"value": None, "weight": 0, "reason": "awaiting_labels"},
-            "alerts": {"value": alert_component, "weight": weight_alerts},
+            "drift": {
+                "value": round(drift_component * 100, 1),
+                "normalized": drift_component,
+                "weight": effective_drift_weight,
+            },
+            "performance": {
+                "value": None,
+                "normalized": None,
+                "weight": 0,
+                "reason": "awaiting_labels",
+            },
+            "alerts": {
+                "value": round(alert_component * 100, 1),
+                "normalized": alert_component,
+                "weight": weight_alerts,
+            },
         }
 
-    score = round(max(0.0, min(100.0, raw)), 1)
+    score = round(max(0.0, min(1.0, raw)) * 100, 1)
     return HealthScore(score=score, components=components)
 
 

@@ -23,12 +23,11 @@ export function UserAccountModal({ isOpen, onClose, user, onLogin, onLogout }: P
 
     setTimeout(() => {
       const loggedUser = {
-        name: googleName || 'John Smith',
-        email: googleEmail || 'john.smith@watchdog.ai',
-        picture: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-        initials: (googleName || 'John Smith').split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2),
-        role: 'Lead ML Engineer',
-        authProvider: 'Google OAuth 2.0',
+        name: googleName,
+        email: googleEmail,
+        initials: googleName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2),
+        role: 'User',
+        authProvider: 'Google',
       }
       onLogin(loggedUser)
       setIsLoggingIn(false)
@@ -42,7 +41,7 @@ export function UserAccountModal({ isOpen, onClose, user, onLogin, onLogout }: P
         <div className="flex items-center justify-between border-b border-outline-variant pb-4">
           <div className="flex items-center gap-2.5">
             <div className="h-10 w-10 rounded-full bg-primary text-on-primary font-bold text-sm flex items-center justify-center ring-2 ring-primary/20">
-              {user ? user.initials : 'JS'}
+              {user?.initials || '—'}
             </div>
             <div>
               <h2 className="text-title-lg font-bold text-on-surface">{user ? user.name : 'Account Profile'}</h2>
@@ -94,7 +93,7 @@ export function UserAccountModal({ isOpen, onClose, user, onLogin, onLogout }: P
               <label className="block text-label-md font-semibold text-on-surface-variant mb-1">Google Email</label>
               <input
                 type="email"
-                placeholder="john.smith@watchdog.ai"
+                placeholder="name@company.com"
                 value={googleEmail}
                 onChange={(e) => setGoogleEmail(e.target.value)}
                 className="w-full h-10 px-3 rounded-lg border border-outline-variant bg-surface text-sm focus:outline-none focus:border-primary"
@@ -105,7 +104,7 @@ export function UserAccountModal({ isOpen, onClose, user, onLogin, onLogout }: P
               <label className="block text-label-md font-semibold text-on-surface-variant mb-1">Full Name</label>
               <input
                 type="text"
-                placeholder="John Smith"
+                placeholder="Your name"
                 value={googleName}
                 onChange={(e) => setGoogleName(e.target.value)}
                 className="w-full h-10 px-3 rounded-lg border border-outline-variant bg-surface text-sm focus:outline-none focus:border-primary"

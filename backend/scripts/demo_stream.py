@@ -17,12 +17,11 @@ Requirements: scikit-learn, pandas, numpy (already in requirements.txt via scipy
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
-import io
 import json
 import urllib.request
-import urllib.error
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -38,9 +37,7 @@ def _fetch_adult() -> tuple:
     """Download UCI Adult Income dataset and return (X_train, X_test, y_train, y_test, feature_names)."""
     try:
         import pandas as pd
-        import numpy as np
         from sklearn.model_selection import train_test_split
-        from sklearn.preprocessing import LabelEncoder
     except ImportError:
         print("ERROR: scikit-learn and pandas are required. pip install scikit-learn pandas")
         sys.exit(1)
@@ -54,23 +51,10 @@ def _fetch_adult() -> tuple:
     print("Downloading Adult Income dataset...")
     try:
         df = pd.read_csv(url, names=cols, na_values=" ?", skipinitialspace=True)
-    except Exception as e:
-        print(f"Download failed ({e}). Using synthetic fallback data.")
-        rng = np.random.default_rng(42)
-        n = 5000
-        df = pd.DataFrame({
-            "age": rng.integers(18, 70, n).astype(float),
-            "education_num": rng.integers(1, 16, n).astype(float),
-            "hours_per_week": rng.integers(20, 60, n).astype(float),
-            "capital_gain": rng.exponential(500, n),
-            "capital_loss": rng.exponential(50, n),
-            "income": rng.choice([0, 1], n, p=[0.75, 0.25]),
-        })
-        feature_cols = ["age", "education_num", "hours_per_week", "capital_gain", "capital_loss"]
-        X = df[feature_cols].values
-        y = df["income"].values
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-        return X_train, X_test, y_train, y_test, feature_cols
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not download the UCI Adult dataset; refusing to generate substitute data."
+        ) from exc
 
     # Drop rows with nulls in key columns
     numeric_cols = ["age", "education_num", "hours_per_week", "capital_gain", "capital_loss"]
@@ -115,7 +99,13 @@ def _register_model(base_url: str) -> str:
         return json.loads(resp.read())["id"]
 
 
-def _upload_baseline(base_url: str, model_id: str, X_train, feature_names: list[str]) -> None:
+def _upload_baseline(
+    base_url: str,
+    model_id: str,
+    X_train,
+    feature_names: list[str],
+    api_key: str = "",
+) -> None:
     """Upload training data as a baseline CSV."""
     import io as _io
     import csv
@@ -134,10 +124,15 @@ def _upload_baseline(base_url: str, model_id: str, X_train, feature_names: list[
         f"Content-Type: text/csv\r\n\r\n"
     ).encode() + csv_bytes + f"\r\n--{boundary}--\r\n".encode()
 
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{base_url}/api/models/{model_id}/baseline",
         data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -241,6 +236,11 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--drift", action="store_true", help="Inject drift in second half of predictions")
     parser.add_argument("--batch-size", type=int, default=50)
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("INGEST_API_KEY", ""),
+        help="Ingest key; defaults to INGEST_API_KEY",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -266,10 +266,10 @@ def main() -> None:
 
     # 3. Upload baseline
     print("\nUploading training baseline...")
-    _upload_baseline(args.base_url, model_id, X_train, feature_names)
+    _upload_baseline(args.base_url, model_id, X_train, feature_names, args.api_key)
 
     # 4. Stream predictions
-    client = WatchdogClient(base_url=args.base_url, model_id=model_id)
+    client = WatchdogClient(base_url=args.base_url, model_id=model_id, api_key=args.api_key)
     prediction_ids = _stream_predictions(
         client, model, X_test, y_test, feature_names,
         batch_size=args.batch_size,

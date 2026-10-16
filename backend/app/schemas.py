@@ -310,8 +310,11 @@ class AlertRuleCreate(BaseModel):
     threshold_critical: float = Field(alias="thresholdCritical")
     enabled: bool = True
     feature_name: Optional[str] = Field(None, alias="featureName")
+    comparison: Optional[str] = None
+    min_samples: Optional[int] = Field(None, alias="minSamples")
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
+    channels: Optional[list[str]] = None
 
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
@@ -321,8 +324,11 @@ class AlertRuleUpdate(BaseModel):
     threshold_critical: Optional[float] = Field(None, alias="thresholdCritical")
     enabled: Optional[bool] = None
     feature_name: Optional[str] = Field(None, alias="featureName")
+    comparison: Optional[str] = None
+    min_samples: Optional[int] = Field(None, alias="minSamples")
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
+    channels: Optional[list[str]] = None
 
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
@@ -337,8 +343,11 @@ class AlertRuleOut(BaseModel):
     threshold_critical: float = Field(alias="thresholdCritical")
     enabled: bool
     feature_name: Optional[str] = Field(None, alias="featureName")
+    comparison: Optional[str] = None
+    min_samples: Optional[int] = Field(None, alias="minSamples")
     consecutive_windows: Optional[int] = Field(None, alias="consecutiveWindows")
     cooldown_minutes: Optional[int] = Field(None, alias="cooldownMinutes")
+    channels: Optional[list[str]] = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True, protected_namespaces=())
 

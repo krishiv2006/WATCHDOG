@@ -29,17 +29,14 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
     setResult(null)
 
     try {
-      const formData = new FormData()
-      formData.append('name', name || (file ? file.name.replace('.csv', '') : 'New ML Model'))
-      formData.append('version', version)
-      formData.append('algorithm', algorithm)
-      formData.append('environment', environment)
-      if (file) {
-        formData.append('file', file)
-      }
-
-      const res = await api.ingestDataset(formData)
-      setResult(res)
+      const res = await api.createModel({
+        name: name || (file ? file.name.replace('.csv', '') : 'New ML Model'),
+        version,
+        algorithm,
+        environment,
+      })
+      const baseline = file ? await api.uploadBaseline(res.id, file) : null
+      setResult({ ...res, baseline })
       setTimeout(() => {
         onSuccess()
       }, 1500)

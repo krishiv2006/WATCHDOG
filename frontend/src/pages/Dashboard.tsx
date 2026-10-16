@@ -16,13 +16,24 @@ export default function Dashboard() {
   const [tableSearch, setTableSearch] = useState("")
   const [dateFilter, setDateFilter] = useState("30d")
   const [statusFilter, setStatusFilter] = useState("all")
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    api.getDashboardSummary(dateFilter).then(setData)
-    api.getModels().then(setModels)
+    setIsLoading(true)
+    setError(null)
+    Promise.all([api.getDashboardSummary(dateFilter), api.getModels()])
+      .then(([summary, modelList]) => {
+        setData(summary)
+        setModels(modelList)
+      })
+      .catch(fetchError => setError(fetchError instanceof Error ? fetchError.message : 'Unable to load dashboard metrics.'))
+      .finally(() => setIsLoading(false))
   }, [dateFilter])
 
-  if (!data) return <div className="flex items-center justify-center h-full text-on-surface-variant animate-pulse p-10">Fetching metrics...</div>
+  if (isLoading && !data) return <div className="flex items-center justify-center h-full text-on-surface-variant animate-pulse p-10">Fetching metrics...</div>
+  if (error && !data) return <div className="flex items-center justify-center h-full text-error p-10">Unable to load dashboard metrics: {error}</div>
+  if (!data) return <div className="flex items-center justify-center h-full text-on-surface-variant p-10">Dashboard metrics are unavailable.</div>
 
   const filteredModels = models.filter(m => {
     const matchesSearch = m.name.toLowerCase().includes(tableSearch.toLowerCase()) || m.algorithm.toLowerCase().includes(tableSearch.toLowerCase())
@@ -129,7 +140,7 @@ export default function Dashboard() {
             </Button>
           </CardHeader>
           <CardContent className="flex-1 p-6">
-            <div className="h-[250px] w-full">
+            <div className="h-[250px] min-h-[250px] w-full min-w-0">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={data.healthOverTime} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
                   <defs>
@@ -266,4 +277,3 @@ export default function Dashboard() {
     </div>
   )
 }
-

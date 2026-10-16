@@ -5,33 +5,52 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { RefreshCw, Upload } from 'lucide-react'
+import type { DriftScore, Model } from '@/types'
 
 export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () => void }) {
-  const [models, setModels] = useState<any[]>([])
+  const [models, setModels] = useState<Model[]>([])
   const [selectedModelId, setSelectedModelId] = useState<string>('')
-  const [driftScores, setDriftScores] = useState<any[]>([])
+  const [driftScores, setDriftScores] = useState<DriftScore[]>([])
   const [timeWindow, setTimeWindow] = useState<string>('30d')
   const [isLoading, setIsLoading] = useState(false)
+  const [isModelsLoading, setIsModelsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     api.getModels().then(res => {
       setModels(res)
-      if (res.length > 0) {
-        setSelectedModelId(res[0].id)
-      }
-    })
+      if (res.length > 0) setSelectedModelId(res[0].id)
+    }).catch(fetchError => {
+      setError(fetchError instanceof Error ? fetchError.message : 'Unable to load models.')
+    }).finally(() => setIsModelsLoading(false))
   }, [])
 
   useEffect(() => {
     if (selectedModelId) {
       setIsLoading(true)
+      setError(null)
       api.getModelDrift(selectedModelId, timeWindow)
         .then(setDriftScores)
+        .catch(fetchError => setError(fetchError instanceof Error ? fetchError.message : 'Unable to load drift scores.'))
         .finally(() => setIsLoading(false))
     }
   }, [selectedModelId, timeWindow])
 
   const selectedModel = models.find(m => m.id === selectedModelId)
+
+  const handleRecheck = async () => {
+    if (!selectedModelId) return
+    setIsLoading(true)
+    setError(null)
+    try {
+      await api.reevaluateModel(selectedModelId)
+      setDriftScores(await api.getModelDrift(selectedModelId, timeWindow))
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : 'Unable to recheck drift scores.')
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -64,7 +83,7 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
       </div>
 
       {/* Model Selection */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-outline-variant">
+      <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-outline-variant min-w-0">
         {models.map(m => (
           <button
             key={m.id}
@@ -116,13 +135,7 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
             <CardTitle>Feature Drift & Population Stability</CardTitle>
             <CardDescription>Baseline distribution comparison against production inferencing</CardDescription>
           </div>
-          <Button variant="outline" size="sm" onClick={() => {
-            if (selectedModelId) {
-              api.reevaluateModel(selectedModelId).then(() => {
-                api.getModelDrift(selectedModelId, timeWindow).then(setDriftScores)
-              })
-            }
-          }}>
+          <Button variant="outline" size="sm" onClick={handleRecheck} disabled={isLoading || !selectedModelId}>
             <RefreshCw className="h-4 w-4 mr-2" /> Recheck Drift
           </Button>
         </CardHeader>
@@ -135,20 +148,25 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
                 <TableHead>Current Mean</TableHead>
                 <TableHead>PSI Drift Score</TableHead>
                 <TableHead>JS Distance</TableHead>
+                <TableHead>Live Samples</TableHead>
                 <TableHead>Status</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {isLoading ? (
+              {isModelsLoading ? (
+                <TableRow><TableCell colSpan={7} className="text-center py-10 text-on-surface-variant animate-pulse">Loading models...</TableCell></TableRow>
+              ) : error ? (
+                <TableRow><TableCell colSpan={7} className="text-center py-10 text-error">Unable to load drift data: {error}</TableCell></TableRow>
+              ) : isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-10 text-on-surface-variant animate-pulse">
-                    Calculating Population Stability Index...
+                  <TableCell colSpan={7} className="text-center py-10 text-on-surface-variant animate-pulse">
+                    Loading PSI and JS distance scores...
                   </TableCell>
                 </TableRow>
               ) : driftScores.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-10 text-on-surface-variant">
-                    No drift data recorded for this model yet.
+                  <TableCell colSpan={7} className="text-center py-10 text-on-surface-variant">
+                    Not enough data yet: upload a baseline and send live predictions before drift can be calculated.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -159,6 +177,7 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
                     <TableCell>{row.currentMean != null ? Number(row.currentMean).toLocaleString() : '—'}</TableCell>
                     <TableCell className="font-mono font-semibold">{row.driftScore != null ? Number(row.driftScore).toFixed(4) : '—'}</TableCell>
                     <TableCell className="font-mono text-on-surface-variant">{row.jsDistance != null ? Number(row.jsDistance).toFixed(4) : 'N/A'}</TableCell>
+                    <TableCell>{row.nLive != null ? row.nLive.toLocaleString() : '—'}</TableCell>
                     <TableCell>
                       <Badge variant={row.status as any} className="uppercase leading-none py-1 text-[10px]">
                         {row.status}

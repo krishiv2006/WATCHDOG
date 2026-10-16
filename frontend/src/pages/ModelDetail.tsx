@@ -8,23 +8,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { RefreshCw, ArrowDown, Minus, Loader2 } from "lucide-react"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import type { Model } from "@/types"
+import type { Model, DriftScore } from "@/types"
 
-interface DriftRow {
-  featureName: string
-  baselineMean: number | null
-  currentMean: number | null
-  driftScore: number | null
-  jsDistance?: number | null
-  ksStatistic?: number | null
-  ksPvalue?: number | null
-  status: 'critical' | 'warning' | 'stable' | 'insufficient_data'
+type DriftRow = Omit<DriftScore, 'status'> & {
+  status: DriftScore['status']
   confidence?: string | null
-  reason?: string | null
-  nLive?: number | null
-  nBaseline?: number | null
-  outOfRangeRate?: number | null
-  timestamp?: string | null
 }
 
 export default function ModelDetail() {
@@ -39,12 +27,26 @@ export default function ModelDetail() {
     taskType: string | null
   } | null>(null)
   const [isReevaluating, setIsReevaluating] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const fetchData = () => {
-    if (id) {
-      api.getModel(id).then(setModel)
-      api.getModelDrift(id).then(setDrift)
-      api.getModelPerformance(id).then(setPerformance)
+  const fetchData = async () => {
+    if (!id) return
+    setIsLoading(true)
+    setError(null)
+    try {
+      const [modelResult, driftResult, performanceResult] = await Promise.all([
+        api.getModel(id),
+        api.getModelDrift(id),
+        api.getModelPerformance(id),
+      ])
+      setModel(modelResult)
+      setDrift(driftResult)
+      setPerformance(performanceResult)
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : 'Unable to load model metrics.')
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -55,14 +57,19 @@ export default function ModelDetail() {
   const handleReevaluate = async () => {
     if (!id) return
     setIsReevaluating(true)
-    await api.reevaluateModel(id)
-    setTimeout(() => {
-      fetchData()
+    try {
+      await api.reevaluateModel(id)
+      await fetchData()
+    } catch (reevaluateError) {
+      setError(reevaluateError instanceof Error ? reevaluateError.message : 'Unable to reevaluate this model.')
+    } finally {
       setIsReevaluating(false)
-    }, 1500)
+    }
   }
 
-  if (!model) return <div className="p-10 animate-pulse text-on-surface-variant text-center">Loading model metrics...</div>
+  if (isLoading && !model) return <div className="p-10 animate-pulse text-on-surface-variant text-center">Loading model metrics...</div>
+  if (error && !model) return <div className="p-10 text-error text-center">Unable to load model metrics: {error}</div>
+  if (!model) return <div className="p-10 text-on-surface-variant text-center">Model data is unavailable.</div>
 
   return (
     <div className="space-y-6">
@@ -150,14 +157,19 @@ export default function ModelDetail() {
                     <TableHead>Current Mean</TableHead>
                     <TableHead>PSI Score</TableHead>
                     <TableHead>JS Distance</TableHead>
+                    <TableHead>Live Samples</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {drift.length === 0 ? (
+                  {error ? (
+                    <TableRow><TableCell colSpan={7} className="text-center py-8 text-error">Unable to load drift data: {error}</TableCell></TableRow>
+                  ) : isLoading ? (
+                    <TableRow><TableCell colSpan={7} className="text-center py-8 text-on-surface-variant animate-pulse">Loading drift scores...</TableCell></TableRow>
+                  ) : drift.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-center py-8 text-on-surface-variant">
-                        No feature drift calculated yet.
+                      <TableCell colSpan={7} className="text-center py-8 text-on-surface-variant">
+                        Not enough data yet: upload a baseline and send live predictions before drift can be calculated.
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -170,6 +182,7 @@ export default function ModelDetail() {
                         <TableCell className="text-on-surface-variant">
                           {row.jsDistance != null ? row.jsDistance.toFixed(4) : '—'}
                         </TableCell>
+                        <TableCell>{row.nLive != null ? row.nLive.toLocaleString() : '—'}</TableCell>
                         <TableCell>
                           {row.status === 'stable' && <Badge variant="stable">Stable</Badge>}
                           {row.status === 'warning' && <Badge variant="warning">Warning</Badge>}
@@ -235,7 +248,7 @@ export default function ModelDetail() {
               <CardTitle>Accuracy Degradation Over Time</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="h-72 w-full">
+              <div className="h-72 min-h-72 w-full min-w-0">
                 {performance && (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={performance.timeSeries}>

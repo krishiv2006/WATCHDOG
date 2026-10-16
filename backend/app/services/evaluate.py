@@ -40,6 +40,7 @@ from app.services.alerting import (
     upsert_drift_alert,
     upsert_quality_alert,
     upsert_performance_alert,
+    auto_resolve_alert,
 )
 from app.services.quality import volume_anomaly, feature_null_spikes
 
@@ -67,6 +68,27 @@ def _get_thresholds(model_id: str, metric: str, db: Session) -> tuple[float, flo
     if metric == "js_distance":
         return settings.JS_THRESHOLD_WARNING, settings.JS_THRESHOLD_CRITICAL
     return settings.PSI_THRESHOLD_WARNING, settings.PSI_THRESHOLD_CRITICAL
+
+
+def _get_min_sample_size(model_id: str, feature_name: str, db: Session) -> int:
+    from app.models import AlertRule
+
+    query = db.query(AlertRule).filter(
+        AlertRule.metric == "psi",
+        AlertRule.enabled == True,  # noqa: E712
+    )
+    rule = (
+        query.filter(
+            AlertRule.model_id == model_id,
+            AlertRule.feature_name == feature_name,
+        ).first()
+        or query.filter(
+            AlertRule.model_id == model_id,
+            AlertRule.feature_name.is_(None),
+        ).first()
+        or query.filter(AlertRule.model_id.is_(None)).first()
+    )
+    return rule.min_samples if rule and rule.min_samples is not None else settings.MIN_SAMPLE_SIZE
 
 
 def _live_values(predictions: list[PredictionLog], feature: str) -> list[float]:
@@ -156,6 +178,11 @@ def _score_numeric(profile: dict, live_vals: list[float], n_buckets: int) -> dic
     if profile.get("histogram_counts") and profile.get("histogram_edges") and n_live:
         hist_edges = np.array(profile["histogram_edges"])
         live_hist, _ = np.histogram(live_arr, bins=hist_edges)
+        below = int(np.sum(live_arr < hist_edges[0]))
+        above = int(np.sum(live_arr > hist_edges[-1]))
+        if len(live_hist):
+            live_hist[0] += below
+            live_hist[-1] += above
         js_val = compute_js_from_histograms(profile["histogram_counts"], live_hist.tolist())
 
     return {
@@ -248,7 +275,7 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             psi_critical=psi_crit,
             js_warning=js_warn,
             js_critical=js_crit,
-            min_sample_size=settings.MIN_SAMPLE_SIZE,
+            min_sample_size=_get_min_sample_size(model.id, feature, db),
             is_constant=scored["is_constant"],
         )
         if scored["n_live"] > 0:
@@ -309,15 +336,25 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             f"Last window ingested {vol['current']} predictions vs rolling average {vol['expected']}.",
             vol["ratio"],
         )
+    else:
+        auto_resolve_alert(
+            db, model.id, f"{model.id}:data_quality:volume", model_name
+        )
 
     spikes = feature_null_spikes(predictions, baseline)
+    spike_fingerprints = set()
     for sp in spikes:
+        spike_fingerprints.add(f"{model.id}:data_quality:null:{sp['feature']}")
         upsert_quality_alert(
             db, model.id, model_name, f"null:{sp['feature']}",
             f"Null-rate spike: {sp['feature']}",
             f"Live null rate {sp['liveNullRate']} vs baseline {sp['baselineNullRate']}.",
             sp["liveNullRate"],
         )
+    for profile in baseline.feature_profiles or []:
+        fingerprint = f"{model.id}:data_quality:null:{profile['name']}"
+        if fingerprint not in spike_fingerprints:
+            auto_resolve_alert(db, model.id, fingerprint, model_name)
 
     # Performance from labels only
     labeled = [p for p in predictions if p.actual_value is not None and p.predicted_value is not None]
@@ -367,6 +404,14 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
                     f"Live accuracy/error is {perf_ratio:.0%} of baseline performance.",
                     perf_ratio,
                 )
+            else:
+                auto_resolve_alert(
+                    db, model.id, f"{model.id}:performance:degradation", model_name
+                )
+    else:
+        auto_resolve_alert(
+            db, model.id, f"{model.id}:performance:degradation", model_name
+        )
     db.add(snap)
 
     avg_psi = float(np.mean(psi_scores)) if psi_scores else 0.0

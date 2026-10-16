@@ -21,6 +21,7 @@ import csv
 import json
 import pytest
 import numpy as np
+from datetime import timedelta
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -30,6 +31,7 @@ from app.database import Base, get_db
 import app.models  # noqa: F401  # Ensure ORM metadata exists before create_all()
 from app.main import app
 from app.config import get_settings
+from app.models import BaselineVersion, DriftScore, utcnow
 
 
 # ── Isolated test DB ────────────────────────────────────────────────────────
@@ -156,6 +158,21 @@ class TestBaselineUpload:
         assert result["sampleSize"] == 500
         assert "baselineVersionId" in result
 
+    def test_upload_stores_distribution_profile_without_performance_fabrication(self, client):
+        mid = _create_model(client)
+        _upload_baseline(client, mid)
+        db_session = next(client.app.dependency_overrides[get_db]())
+        baseline = db_session.query(BaselineVersion).filter(
+            BaselineVersion.model_id == mid
+        ).one()
+        profile = baseline.feature_profiles[0]
+        assert profile["type"] == "numeric"
+        assert {"null_rate", "min", "max", "mean", "std"} <= profile.keys()
+        assert profile["quantile_edges"]
+        assert profile["histogram_counts"]
+        assert profile["histogram_edges"]
+        assert baseline.performance_metrics is None
+
     def test_upload_lists_in_baselines(self, client):
         mid = _create_model(client)
         _upload_baseline(client, mid)
@@ -227,6 +244,34 @@ class TestPredictionIngestion:
         assert data["ingested"] == 20
         assert data["duplicates"] == 0
 
+    def test_ingest_single_prediction(self, client):
+        mid = _create_model(client)
+        response = client.post(
+            f"/api/models/{mid}/predictions",
+            json={
+                "predictionId": "single-1",
+                "features": {"age": 30.0},
+                "prediction": 1.0,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ingested"] == 1
+
+    def test_duplicate_prediction_ids_in_same_batch_are_ignored(self, client):
+        mid = _create_model(client)
+        response = client.post(
+            f"/api/models/{mid}/predictions",
+            json={
+                "predictions": [
+                    {"predictionId": "same", "features": {"x": 1.0}, "prediction": 0.0},
+                    {"predictionId": "same", "features": {"x": 2.0}, "prediction": 1.0},
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ingested"] == 1
+        assert response.json()["duplicates"] == 1
+
     def test_idempotency_on_prediction_id(self, client):
         mid = _create_model(client)
         batch = self._make_batch(5)
@@ -265,6 +310,13 @@ class TestPredictionIngestion:
             json={"predictions": [{"features": {"x": 1.0}, "prediction": 0.0}]},
         )
         assert resp.status_code == 404
+
+    def test_legacy_dataset_ingestion_is_removed(self, client):
+        response = client.post(
+            "/api/models/ingest-dataset",
+            files={"file": ("training.csv", _make_baseline_csv(), "text/csv")},
+        )
+        assert response.status_code == 410
 
 
 # ── Ground truth ─────────────────────────────────────────────────────────────
@@ -395,6 +447,40 @@ class TestDriftEndpoints:
         assert len(drifts) == 3
         feature_names = {d["featureName"] for d in drifts}
         assert feature_names == {"age", "income", "credit_score"}
+        assert all("jsDistance" in drift for drift in drifts)
+        assert all("nLive" in drift for drift in drifts)
+
+    def test_drift_returns_only_latest_score_per_feature(self, client):
+        mid = _create_model(client)
+        db_session = next(client.app.dependency_overrides[get_db]())
+        timestamp = utcnow()
+        db_session.add_all([
+            DriftScore(
+                id="older",
+                model_id=mid,
+                feature_name="age",
+                timestamp=timestamp - timedelta(seconds=1),
+                psi_score=0.1,
+                js_distance=0.01,
+                status="stable",
+            ),
+            DriftScore(
+                id="newer",
+                model_id=mid,
+                feature_name="age",
+                timestamp=timestamp,
+                psi_score=0.2,
+                js_distance=0.02,
+                status="warning",
+            ),
+        ])
+        db_session.commit()
+
+        response = client.get(f"/api/models/{mid}/drift")
+
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+        assert response.json()[0]["driftScore"] == 0.2
 
 
 # ── Alert lifecycle ──────────────────────────────────────────────────────────
