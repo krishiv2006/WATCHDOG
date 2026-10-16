@@ -27,6 +27,10 @@ from app.services.drift import (
     compute_psi_from_quantile_edges,
     compute_psi_from_histograms,
     compute_js_from_histograms,
+    compute_js_from_quantile_histograms,
+    compute_ks_test,
+    histogram_permutation_p,
+    benjamini_hochberg,
     drift_decision,
     compute_health_score,
     _clean,
@@ -112,6 +116,26 @@ def _live_raw(predictions: list[PredictionLog], feature: str) -> list:
     return vals
 
 
+def prediction_window(
+    db: Session,
+    model_id: str,
+    window_hours: int,
+) -> tuple[datetime | None, datetime | None]:
+    """Return a model's data-anchored evaluation window."""
+    latest = (
+        db.query(PredictionLog.timestamp)
+        .filter(PredictionLog.model_id == model_id)
+        .order_by(PredictionLog.timestamp.desc())
+        .first()
+    )
+    if not latest or latest[0] is None:
+        return None, None
+    window_end = latest[0]
+    if window_end.tzinfo is None:
+        window_end = window_end.replace(tzinfo=utcnow().tzinfo)
+    return window_end - timedelta(hours=window_hours), window_end
+
+
 def _score_categorical(profile: dict, live_raw: list) -> dict:
     from collections import Counter
 
@@ -144,6 +168,8 @@ def _score_categorical(profile: dict, live_raw: list) -> dict:
         "current_std": None,
         "n_buckets": max(len(baseline_counts), 1),
         "is_constant": bool(profile.get("constant")),
+        "baseline_counts": baseline_counts,
+        "live_counts": live_counts,
     }
 
 
@@ -175,15 +201,10 @@ def _score_numeric(profile: dict, live_vals: list[float], n_buckets: int) -> dic
         psi_val = compute_psi_from_histograms(profile["histogram_counts"], live_counts.tolist())
 
     js_val = 0.0
-    if profile.get("histogram_counts") and profile.get("histogram_edges") and n_live:
-        hist_edges = np.array(profile["histogram_edges"])
-        live_hist, _ = np.histogram(live_arr, bins=hist_edges)
-        below = int(np.sum(live_arr < hist_edges[0]))
-        above = int(np.sum(live_arr > hist_edges[-1]))
-        if len(live_hist):
-            live_hist[0] += below
-            live_hist[-1] += above
-        js_val = compute_js_from_histograms(profile["histogram_counts"], live_hist.tolist())
+    if q_counts and n_live:
+        js_val = compute_js_from_quantile_histograms(
+            q_counts, live_arr, edges
+        )
 
     return {
         "psi": psi_val,
@@ -197,6 +218,13 @@ def _score_numeric(profile: dict, live_vals: list[float], n_buckets: int) -> dic
         "current_std": float(live_arr.std()) if n_live > 1 else None,
         "n_buckets": n_buckets if not edges else len(edges) + 1,
         "is_constant": bool(profile.get("constant")),
+        "quantile_counts": (
+            np.bincount(
+                np.digitize(live_arr, np.asarray(edges, dtype=float)),
+                minlength=len(q_counts),
+            )[: len(q_counts)].tolist()
+            if q_counts and n_live else []
+        ),
     }
 
 
@@ -218,17 +246,23 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             "model_id": model.id,
         }
 
-    cutoff = now - timedelta(hours=hours)
-    # Never mix predictions from before this baseline was created
-    if baseline.created_at:
-        bl_created = baseline.created_at
-        if bl_created.tzinfo is None:
-            bl_created = bl_created.replace(tzinfo=cutoff.tzinfo)
-        cutoff = max(cutoff, bl_created)
+    cutoff, window_end = prediction_window(db, model.id, hours)
+    if cutoff is None or window_end is None:
+        model.last_evaluated_at = now
+        db.commit()
+        return {
+            "status": "no_predictions",
+            "message": "No predictions found to evaluate against.",
+            "model_id": model.id,
+        }
 
     predictions = (
         db.query(PredictionLog)
-        .filter(PredictionLog.model_id == model.id, PredictionLog.timestamp >= cutoff)
+        .filter(
+            PredictionLog.model_id == model.id,
+            PredictionLog.timestamp >= cutoff,
+            PredictionLog.timestamp <= window_end,
+        )
         .order_by(PredictionLog.timestamp.desc())
         .limit(settings.MAX_BATCH_PREDICTIONS)
         .all()
@@ -242,11 +276,56 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             "model_id": model.id,
         }
 
+    # Re-evaluating the same live window must replace, not duplicate, scores.
+    db.query(DriftScore).filter(
+        DriftScore.model_id == model.id,
+        DriftScore.timestamp >= cutoff,
+        DriftScore.timestamp <= window_end,
+    ).delete(synchronize_session=False)
+    db.flush()
+
     psi_warn, psi_crit = _get_thresholds(model.id, "psi", db)
     js_warn, js_crit = _get_thresholds(model.id, "js_distance", db)
     model_name = f"{model.name} {model.version}"
     computed = []
     psi_scores: list[float] = []
+    scored_cache: dict[str, dict] = {}
+    raw_p_values: dict[str, float] = {}
+    ks_cache: dict[str, tuple[float | None, float]] = {}
+    for profile in baseline.feature_profiles or []:
+        feature = profile["name"]
+        if profile.get("constant"):
+            continue
+        if profile.get("feature_type") == "categorical":
+            scored = _score_categorical(profile, _live_raw(predictions, feature))
+        else:
+            scored = _score_numeric(
+                profile,
+                _live_values(predictions, feature),
+                baseline.n_psi_buckets or 10,
+            )
+        scored_cache[feature] = scored
+        if profile.get("feature_type") == "categorical":
+            raw_p_values[feature] = histogram_permutation_p(
+                scored["baseline_counts"], scored["live_counts"],
+                settings.DRIFT_PERMUTATION_RESAMPLES,
+            )
+            ks_cache[feature] = (None, raw_p_values[feature])
+        else:
+            edges = np.asarray(profile.get("quantile_edges") or [], dtype=float)
+            counts = np.asarray(profile.get("quantile_counts") or [], dtype=int)
+            boundaries = np.concatenate((
+                [float(profile["min"])], edges, [float(profile["max"])]
+            )) if len(edges) else np.asarray([], dtype=float)
+            if len(counts) and len(boundaries) == len(counts) + 1:
+                centers = (boundaries[:-1] + boundaries[1:]) / 2
+                baseline_values = np.repeat(centers, counts)
+                ks_stat, ks_p = compute_ks_test(baseline_values, _live_values(predictions, feature))
+            else:
+                ks_stat, ks_p = 0.0, 1.0
+            raw_p_values[feature] = ks_p
+            ks_cache[feature] = (ks_stat, ks_p)
+    adjusted_p_values = benjamini_hochberg(raw_p_values)
 
     for profile in baseline.feature_profiles or []:
         feature = profile["name"]
@@ -260,11 +339,9 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             })
             continue
 
-        if profile.get("feature_type") == "categorical":
-            scored = _score_categorical(profile, _live_raw(predictions, feature))
-        else:
-            live_vals = _live_values(predictions, feature)
-            scored = _score_numeric(profile, live_vals, baseline.n_psi_buckets or 10)
+        scored = scored_cache.get(feature)
+        if scored is None:
+            continue
         decision = drift_decision(
             psi=scored["psi"],
             js_distance=scored["js"],
@@ -277,8 +354,9 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             js_critical=js_crit,
             min_sample_size=_get_min_sample_size(model.id, feature, db),
             is_constant=scored["is_constant"],
+            ks_p=adjusted_p_values.get(feature),
         )
-        if scored["n_live"] > 0:
+        if scored["n_live"] > 0 and decision.status != "insufficient_data":
             psi_scores.append(scored["psi"])
 
         rec = DriftScore(
@@ -291,6 +369,8 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
             current_mean=round(scored["current_mean"], 4) if scored["current_mean"] is not None else None,
             baseline_std=profile.get("std"),
             current_std=round(scored["current_std"], 4) if scored["current_std"] is not None else None,
+            ks_statistic=round(ks_cache[feature][0], 4) if ks_cache[feature][0] is not None else None,
+            ks_pvalue=round(adjusted_p_values.get(feature, ks_cache[feature][1]), 6),
             n_live=scored["n_live"],
             n_baseline=scored["n_baseline"],
             null_rate_baseline=scored["null_baseline"],
@@ -354,7 +434,54 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
     for profile in baseline.feature_profiles or []:
         fingerprint = f"{model.id}:data_quality:null:{profile['name']}"
         if fingerprint not in spike_fingerprints:
-            auto_resolve_alert(db, model.id, fingerprint, model_name)
+            auto_resolve_alert(
+                db, model.id, fingerprint, model_name,
+                "Auto-resolved: the column is no longer an eligible live feature.",
+            )
+
+    target_column = (
+        (baseline.prediction_distribution or {}).get("target_column")
+        if baseline.prediction_distribution
+        else None
+    )
+    active_features = {
+        profile["name"] for profile in baseline.feature_profiles or []
+        if profile["name"] != target_column
+    }
+    open_quality_alerts = (
+        db.query(AlertDB)
+        .filter(
+            AlertDB.model_id == model.id,
+            AlertDB.category == "data_quality",
+            AlertDB.status != "resolved",
+            AlertDB.fingerprint.like(f"{model.id}:data_quality:null:%"),
+        )
+        .all()
+    )
+    for alert in open_quality_alerts:
+        feature = alert.fingerprint.rsplit(":", 1)[-1]
+        if feature not in active_features:
+            auto_resolve_alert(
+                db, model.id, alert.fingerprint, model_name,
+                "Auto-resolved: the column is not an active baseline feature.",
+            )
+
+    open_drift_alerts = (
+        db.query(AlertDB)
+        .filter(
+            AlertDB.model_id == model.id,
+            AlertDB.category == "data_drift",
+            AlertDB.status != "resolved",
+        )
+        .all()
+    )
+    for alert in open_drift_alerts:
+        feature = alert.fingerprint.rsplit(":", 1)[-1]
+        if feature not in active_features:
+            auto_resolve_alert(
+                db, model.id, alert.fingerprint, model_name,
+                "Auto-resolved: the column is not an active baseline feature.",
+            )
 
     # Performance from labels only
     labeled = [p for p in predictions if p.actual_value is not None and p.predicted_value is not None]
@@ -421,26 +548,30 @@ def evaluate_model(model: ModelDB, db: Session, window_hours: int | None = None)
         .scalar()
         or 0
     )
-    health = compute_health_score(
-        avg_psi=avg_psi,
-        open_critical_alerts=open_crits,
-        psi_warning=psi_warn,
-        psi_critical=psi_crit,
-        performance_ratio=perf_ratio,
-        weight_drift=settings.HEALTH_WEIGHT_DRIFT,
-        weight_perf=settings.HEALTH_WEIGHT_PERFORMANCE,
-        weight_alerts=settings.HEALTH_WEIGHT_ALERTS,
-        alert_penalty=settings.HEALTH_ALERT_PENALTY,
-    )
-    model.health_score = health.score
+    health = None
+    if psi_scores:
+        health = compute_health_score(
+            avg_psi=avg_psi,
+            open_critical_alerts=open_crits,
+            psi_warning=psi_warn,
+            psi_critical=psi_crit,
+            performance_ratio=perf_ratio,
+            weight_drift=settings.HEALTH_WEIGHT_DRIFT,
+            weight_perf=settings.HEALTH_WEIGHT_PERFORMANCE,
+            weight_alerts=settings.HEALTH_WEIGHT_ALERTS,
+            alert_penalty=settings.HEALTH_ALERT_PENALTY,
+            drift_exponent=settings.HEALTH_DRIFT_EXPONENT,
+        )
+    model.health_score = health.score if health else None
+    model.health_components = health.components if health else None
     model.last_evaluated_at = now
     db.commit()
     return {
         "status": "completed",
         "model_id": model.id,
         "evaluatedAt": now.isoformat(),
-        "healthScore": health.score,
-        "healthComponents": health.components,
+        "healthScore": health.score if health else None,
+        "healthComponents": health.components if health else None,
         "drifts": computed,
         "nPredictions": n_pred,
         "nLabeled": n_lab,

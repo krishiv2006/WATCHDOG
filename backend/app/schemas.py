@@ -41,7 +41,8 @@ class ModelOut(BaseModel):
     environment: str
     status: str
     task_type: Optional[str] = Field(None, alias="taskType")
-    health_score: float = Field(alias="healthScore")
+    health_score: Optional[float] = Field(None, alias="healthScore")
+    health_components: Optional[dict[str, Any]] = Field(None, alias="healthComponents")
     created_at: Optional[datetime] = Field(None, alias="createdAt")
     last_evaluated_at: Optional[datetime] = Field(None, alias="lastEvaluatedAt")
     predictions_count: int = Field(0, alias="predictionsCount")
@@ -60,7 +61,8 @@ class ModelSummary(BaseModel):
     environment: str
     status: str
     predictions_count: int = Field(0, alias="predictionsCount")
-    health_score: float = Field(alias="healthScore")
+    health_score: Optional[float] = Field(None, alias="healthScore")
+    health_components: Optional[dict[str, Any]] = Field(None, alias="healthComponents")
     drift_status: str = Field("Low", alias="driftStatus")
     last_updated: str = Field("", alias="lastUpdated")
 

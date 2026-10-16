@@ -24,6 +24,8 @@ from app.services.drift import (
     compute_psi,
     compute_psi_from_histograms,
     compute_js_distance,
+    compute_js_from_quantile_edges,
+    benjamini_hochberg,
     compute_ks_test,
     drift_decision,
     psi_to_status,
@@ -159,6 +161,21 @@ class TestComputePSI:
         psi, _, _ = compute_psi(baseline, current)
         assert math.isfinite(psi), f"PSI must be finite under extreme shift, got {psi}"
 
+    def test_same_distribution_js_is_low_across_resamples(self):
+        """Finite samples from one distribution must not look like drift."""
+        rng = np.random.default_rng(2026)
+        below_threshold = 0
+        for _ in range(200):
+            baseline = rng.normal(50, 10, 460)
+            current = rng.normal(50, 10, 300)
+            below_threshold += compute_js_distance(baseline, current, n_bins=10) < 0.1
+
+        assert below_threshold >= 190
+
+    def test_identical_arrays_have_zero_js(self):
+        values = np.random.default_rng(7).normal(size=300)
+        assert compute_js_distance(values, values, n_bins=10) == pytest.approx(0.0)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PSI from histograms
@@ -196,6 +213,17 @@ class TestComputePSIFromHistograms:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestComputeJSDistance:
+    def test_stable_resamples_are_below_warning_threshold(self):
+        rng = np.random.default_rng(2026)
+        baseline = rng.normal(0, 1, 5000)
+        distances = [
+            compute_js_from_quantile_edges(
+                baseline, rng.choice(baseline, size=250, replace=False)
+            )
+            for _ in range(200)
+        ]
+        assert np.quantile(distances, 0.95) < DEFAULT_JS_WARNING
+
     def test_identical_distributions_gives_near_zero(self):
         rng = np.random.default_rng(42)
         data = rng.normal(50, 10, 5000)
@@ -366,6 +394,57 @@ class TestDriftDecision:
         # Either noise floor or low PSI → stable
         assert d.status in ("stable",)
 
+    def test_non_significant_psi_excursion_is_stable(self):
+        d = self._decide(
+            psi=0.2,
+            js=0.2,
+            n_live=1000,
+            n_baseline=5000,
+            ks_p=0.2,
+            min_sample_size=250,
+        )
+        assert d.status == "stable"
+        assert "within sampling noise" in d.reason
+
+    def test_stable_resamples_have_low_false_warning_rate(self):
+        rng = np.random.default_rng(7)
+        baseline = rng.normal(0, 1, 5000)
+        warnings = 0
+        trials = 100
+        for _ in range(trials):
+            live = rng.choice(baseline, size=250, replace=False)
+            psi, _, _ = compute_psi(baseline, live)
+            js = compute_js_from_quantile_edges(baseline, live)
+            _, p_value = compute_ks_test(baseline, live)
+            decision = self._decide(
+                psi=psi,
+                js=js,
+                n_live=len(live),
+                n_baseline=len(baseline),
+                ks_p=p_value,
+                min_sample_size=250,
+            )
+            warnings += decision.status in ("warning", "critical")
+        assert warnings / trials < 0.05
+
+    def test_extreme_drift_is_critical_with_finite_psi(self):
+        rng = np.random.default_rng(8)
+        baseline = rng.normal(0, 1, 5000)
+        live = rng.normal(8, 0.2, 250)
+        psi, _, _ = compute_psi(baseline, live)
+        js = compute_js_from_quantile_edges(baseline, live)
+        _, p_value = compute_ks_test(baseline, live)
+        decision = self._decide(
+            psi=psi,
+            js=js,
+            n_live=len(live),
+            n_baseline=len(baseline),
+            ks_p=p_value,
+            min_sample_size=250,
+        )
+        assert math.isfinite(psi)
+        assert decision.status == "critical"
+
     def test_constant_column_gives_insufficient_data(self):
         """Constant baseline column → always insufficient_data."""
         d = self._decide(psi=0.0, js=0.0, is_constant=True, n_live=1000)
@@ -425,13 +504,20 @@ class TestComputeHealthScore:
         hs_low = compute_health_score(avg_psi=0.0, open_critical_alerts=0)
         hs_high = compute_health_score(avg_psi=0.25, open_critical_alerts=0)  # at critical
         assert hs_high.score < hs_low.score
-        assert hs_high.score < 60  # drift component hits zero at psi_critical
+        assert hs_high.score <= 60
 
     def test_psi_above_critical_clamped(self):
-        """PSI well above critical → drift component 0, but score remains >= 0."""
+        """PSI well above critical continues degrading without reaching zero."""
         hs = compute_health_score(avg_psi=10.0, open_critical_alerts=0, performance_ratio=None)
         assert hs.score >= 0
-        assert hs.components["drift"]["value"] == 0.0
+        assert hs.components["drift"]["value"] > 0.0
+
+    def test_health_decreases_monotonically_as_psi_rises(self):
+        scores = [
+            compute_health_score(avg_psi=psi, open_critical_alerts=0).score
+            for psi in np.linspace(0.0, 5.0, 51)
+        ]
+        assert all(left >= right for left, right in zip(scores, scores[1:]))
 
     def test_critical_alerts_reduce_score(self):
         hs0 = compute_health_score(avg_psi=0.0, open_critical_alerts=0)
@@ -443,11 +529,11 @@ class TestComputeHealthScore:
         hs_degraded = compute_health_score(avg_psi=0.0, open_critical_alerts=0, performance_ratio=0.7)
         assert hs_degraded.score < hs_perfect.score
 
-    def test_score_clamped_to_zero(self):
+    def test_score_remains_finite_for_extreme_inputs(self):
         hs = compute_health_score(
             avg_psi=100.0, open_critical_alerts=100, performance_ratio=0.0
         )
-        assert hs.score == 0.0
+        assert 0.0 < hs.score < 1.0
 
     def test_score_clamped_to_hundred(self):
         hs = compute_health_score(avg_psi=-0.5, open_critical_alerts=0, performance_ratio=2.0)

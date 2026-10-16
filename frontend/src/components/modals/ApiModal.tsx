@@ -16,6 +16,7 @@ export function ApiModal({ isOpen, onClose }: Props) {
     { method: 'GET', path: '/api/models', desc: 'List all registered ML models & statuses' },
     { method: 'POST', path: '/api/models/{id}/baseline', desc: 'Upload a training CSV and create an immutable baseline version' },
     { method: 'POST', path: '/api/models/{id}/predictions', desc: 'Ingest single or batch production predictions idempotently' },
+    { method: 'POST', path: '/api/models/{id}/analyze-csv', desc: 'Analyze a production CSV and evaluate drift and performance' },
     { method: 'POST', path: '/api/models/{id}/ground-truth', desc: 'Attach delayed labels to previously ingested predictions' },
     { method: 'GET', path: '/api/models/{id}/drift', desc: 'Get feature-level PSI and JS distance scores' },
     { method: 'GET', path: '/api/models/{id}/performance', desc: 'Get model accuracy degradation over time' },

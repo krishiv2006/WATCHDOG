@@ -123,7 +123,7 @@ export default function ModelsList() {
                           }
                           className="w-full bg-surface-low"
                         />
-                        <span className="text-xs font-semibold w-8 shrink-0">{model.healthScore}</span>
+                        <span className="text-xs font-semibold w-8 shrink-0">{model.healthScore ?? 'No data yet'}</span>
                       </div>
                     </TableCell>
                     <TableCell>

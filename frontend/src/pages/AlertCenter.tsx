@@ -15,7 +15,7 @@ export default function AlertCenter() {
   const [totalCount, setTotalCount] = useState(0)
 
   const fetchAlerts = () => {
-    const statusFilter = activeTab === 'all' ? undefined : activeTab === 'resolved' ? 'resolved' : undefined
+    const statusFilter = activeTab === 'all' ? 'active' : activeTab === 'resolved' ? 'resolved' : undefined
     const severityFilter = (activeTab === 'critical' || activeTab === 'warning') ? activeTab : undefined
 
     api.getAlerts({

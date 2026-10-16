@@ -16,11 +16,43 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
   const [algorithm, setAlgorithm] = useState('XGBoost')
   const [environment, setEnvironment] = useState('production')
   const [file, setFile] = useState<File | null>(null)
+  const [targetColumn, setTargetColumn] = useState('')
+  const [csvColumns, setCsvColumns] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [error, setError] = useState<string | null>(null)
 
   if (!isOpen) return null
+
+  const handleFileChange = async (selectedFile: File | null) => {
+    setFile(selectedFile)
+    setTargetColumn('')
+    setCsvColumns([])
+    if (!selectedFile) return
+
+    const firstLine = (await selectedFile.slice(0, 1024 * 1024).text()).split(/\r?\n/, 1)[0]
+    const columns: string[] = []
+    let current = ''
+    let quoted = false
+    for (let i = 0; i < firstLine.length; i += 1) {
+      const character = firstLine[i]
+      if (character === '"') {
+        if (quoted && firstLine[i + 1] === '"') {
+          current += '"'
+          i += 1
+        } else {
+          quoted = !quoted
+        }
+      } else if (character === ',' && !quoted) {
+        columns.push(current.trim())
+        current = ''
+      } else {
+        current += character
+      }
+    }
+    columns.push(current.trim())
+    setCsvColumns(columns.filter(Boolean))
+  }
 
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -29,13 +61,16 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
     setResult(null)
 
     try {
+      if (file && !targetColumn) {
+        throw new Error('Select the target column before uploading the baseline')
+      }
       const res = await api.createModel({
         name: name || (file ? file.name.replace('.csv', '') : 'New ML Model'),
         version,
         algorithm,
         environment,
       })
-      const baseline = file ? await api.uploadBaseline(res.id, file) : null
+      const baseline = file ? await api.uploadBaseline(res.id, file, targetColumn) : null
       setResult({ ...res, baseline })
       setTimeout(() => {
         onSuccess()
@@ -141,14 +176,14 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
 
           {activeTab === 'upload' && (
             <div className="space-y-2">
-              <label className="block text-label-md font-semibold text-on-surface-variant">Upload Live Dataset (CSV)</label>
+              <label className="block text-label-md font-semibold text-on-surface-variant">Upload Training Baseline (CSV)</label>
               <div className="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 text-center cursor-pointer bg-surface/50 hover:bg-surface transition-colors">
                 <input
                   type="file"
                   accept=".csv"
                   className="hidden"
                   id="csv-file-input"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  onChange={(e) => void handleFileChange(e.target.files?.[0] || null)}
                 />
                 <label htmlFor="csv-file-input" className="cursor-pointer flex flex-col items-center gap-2">
                   <Upload className="h-8 w-8 text-primary" />
@@ -160,6 +195,26 @@ export function RegisterModelModal({ isOpen, onClose, onSuccess }: Props) {
                   </span>
                 </label>
               </div>
+              {file && (
+                <div>
+                  <label htmlFor="target-column" className="block text-label-md font-semibold text-on-surface-variant mb-1">
+                    Target column
+                  </label>
+                  <select
+                    id="target-column"
+                    value={targetColumn}
+                    onChange={(e) => setTargetColumn(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-outline-variant bg-surface text-sm focus:outline-none focus:border-primary"
+                    required
+                  >
+                    <option value="">Select the label/prediction column</option>
+                    {csvColumns.map((column) => <option key={column} value={column}>{column}</option>)}
+                  </select>
+                  <p className="mt-1 text-xs text-on-surface-variant">
+                    This column is stored as the baseline prediction distribution and excluded from feature drift.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

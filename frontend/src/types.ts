@@ -6,7 +6,8 @@ export interface Model {
   environment: string
   status: 'production' | 'staging' | 'retired' | 'retraining'
   predictionsCount: number
-  healthScore: number
+  healthScore: number | null
+  healthComponents?: Record<string, { value: number | null; normalized: number | null; weight: number; reason?: string }>
   driftStatus: 'Low' | 'Moderate' | 'High'
   lastUpdated: string
 }
@@ -32,5 +33,6 @@ export interface DriftScore {
   nLive: number | null
   nBaseline?: number | null
   reason?: string | null
+  confidence?: string | null
   status: 'critical' | 'warning' | 'stable' | 'insufficient_data'
 }

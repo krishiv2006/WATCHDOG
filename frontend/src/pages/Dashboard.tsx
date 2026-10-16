@@ -141,21 +141,30 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="flex-1 p-6">
             <div className="h-[250px] min-h-[250px] w-full min-w-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data.healthOverTime} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorHealth" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#0047c1" stopOpacity={0.2}/>
-                      <stop offset="95%" stopColor="#0047c1" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#c3c6d8" />
-                  <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{fill: '#434655', fontSize: 12}} />
-                  <YAxis domain={['auto', 100]} axisLine={false} tickLine={false} tick={{fill: '#434655', fontSize: 12}} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
-                  <Area type="monotone" dataKey="value" stroke="#0047c1" strokeWidth={3} fillOpacity={1} fill="url(#colorHealth)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              {data.healthOverTime?.some((point: { value: number | null }) => point.value !== null && point.value !== undefined) ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={data.healthOverTime.filter((point: { value: number | null }) => point.value !== null && point.value !== undefined)}
+                    margin={{ top: 10, right: 0, left: -20, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="colorHealth" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#0047c1" stopOpacity={0.2}/>
+                        <stop offset="95%" stopColor="#0047c1" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#c3c6d8" />
+                    <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{fill: '#434655', fontSize: 12}} />
+                    <YAxis domain={['auto', 100]} axisLine={false} tickLine={false} tick={{fill: '#434655', fontSize: 12}} />
+                    <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
+                    <Area type="monotone" dataKey="value" stroke="#0047c1" strokeWidth={3} fillOpacity={1} fill="url(#colorHealth)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-center text-sm text-on-surface-variant">
+                  No health data yet. Evaluate a model after sending predictions.
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -252,7 +261,7 @@ export default function Dashboard() {
                         indicatorColor={model.healthScore > 80 ? 'bg-stable-text' : model.healthScore > 50 ? 'bg-warning-text' : 'bg-error'}
                         className="w-full bg-surface-low" 
                        />
-                       <span className="text-xs font-semibold w-6">{model.healthScore}</span>
+                       <span className="text-xs font-semibold w-6">{model.healthScore ?? 'No data yet'}</span>
                     </div>
                   </TableCell>
                   <TableCell>

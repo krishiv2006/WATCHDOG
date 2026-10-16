@@ -90,11 +90,30 @@ def consecutive_flagged(
     return all(r.status in ("warning", "critical") for r in rows)
 
 
+def consecutive_stable(
+    db: Session,
+    model_id: str,
+    feature_name: str,
+    n: int,
+) -> bool:
+    if n <= 1:
+        return True
+    rows = (
+        db.query(DriftScore)
+        .filter(DriftScore.model_id == model_id, DriftScore.feature_name == feature_name)
+        .order_by(DriftScore.timestamp.desc())
+        .limit(n)
+        .all()
+    )
+    return len(rows) >= n and all(row.status == "stable" for row in rows)
+
+
 def auto_resolve_alert(
     db: Session,
     model_id: str,
     fingerprint: str,
     model_name: str,
+    resolution_note: str = "Auto-resolved: the triggering condition is no longer present.",
 ) -> AlertDB | None:
     """Resolve an open alert when its triggering condition is no longer present."""
     alert = (
@@ -110,6 +129,7 @@ def auto_resolve_alert(
     alert.resolved_at = now
     alert.last_seen_at = now
     alert.auto_resolved = True
+    alert.description = f"{alert.description or ''} {resolution_note}".strip()
     db.flush()
     _broadcast({"event": "alert_updated", "alert": _alert_dict(alert, model_name)})
     return alert
@@ -149,11 +169,16 @@ def upsert_drift_alert(
     )
 
     if status not in ("warning", "critical"):
-        if open_alert:
+        if open_alert and consecutive_stable(db, model_id, feature_name, consecutive):
             open_alert.status = "resolved"
             open_alert.resolved_at = now
             open_alert.auto_resolved = True
             open_alert.last_seen_at = now
+            open_alert.description = (
+                f"{open_alert.description or ''} "
+                f"Auto-resolved: {feature_name} returned to Stable after "
+                f"{consecutive} consecutive window(s)."
+            ).strip()
             db.flush()
             _broadcast({"event": "alert_updated", "alert": _alert_dict(open_alert, model_name)})
         return None

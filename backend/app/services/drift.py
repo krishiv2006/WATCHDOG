@@ -43,6 +43,7 @@ DEFAULT_PSI_WARNING: float = settings.PSI_THRESHOLD_WARNING
 DEFAULT_PSI_CRITICAL: float = settings.PSI_THRESHOLD_CRITICAL
 DEFAULT_JS_WARNING: float = settings.JS_THRESHOLD_WARNING
 DEFAULT_JS_CRITICAL: float = settings.JS_THRESHOLD_CRITICAL
+JS_SMOOTHING_COUNT: float = settings.JS_SMOOTHING_COUNT
 DEFAULT_MIN_SAMPLE_SIZE: int = settings.MIN_SAMPLE_SIZE
 MIN_BUCKET_PROPORTION: float = 1e-4
 
@@ -220,9 +221,45 @@ def compute_js_from_histograms(
     c_pad = np.zeros(n)
     b_pad[: len(b)] = b
     c_pad[: len(c)] = c
-    b_pad = (b_pad + 0.5) / (b_pad.sum() + 0.5 * n)
-    c_pad = (c_pad + 0.5) / (c_pad.sum() + 0.5 * n)
-    return float(jensenshannon(b_pad, c_pad))
+    smoothing = JS_SMOOTHING_COUNT
+    b_pad = (b_pad + smoothing) / (b_pad.sum() + smoothing * n)
+    c_pad = (c_pad + smoothing) / (c_pad.sum() + smoothing * n)
+    return float(jensenshannon(b_pad, c_pad, base=2))
+
+
+def compute_js_from_quantile_edges(
+    baseline: np.ndarray,
+    current: np.ndarray,
+    n_buckets: int = 10,
+) -> float:
+    """Compute JS distance using the same baseline quantile buckets as PSI."""
+    baseline_arr, _ = _clean(np.asarray(baseline, dtype=float), "baseline")
+    current_arr, _ = _clean(np.asarray(current, dtype=float), "current")
+    if len(baseline_arr) == 0 or len(current_arr) == 0 or np.ptp(baseline_arr) == 0:
+        return 0.0
+    interior = np.unique(np.percentile(
+        baseline_arr, np.linspace(0, 100, n_buckets + 1)[1:-1]
+    ))
+    edges = np.concatenate([[-np.inf], interior, [np.inf]])
+    b_counts, _ = np.histogram(baseline_arr, bins=edges)
+    c_counts, _ = np.histogram(current_arr, bins=edges)
+    return compute_js_from_histograms(b_counts.tolist(), c_counts.tolist())
+
+
+def compute_js_from_quantile_histograms(
+    baseline_counts: list[float],
+    current_values: np.ndarray,
+    interior_edges: list[float] | np.ndarray,
+) -> float:
+    """Compute JS from stored PSI quantile edges and baseline counts."""
+    live, _ = _clean(np.asarray(current_values, dtype=float), "live")
+    if len(live) == 0 or not baseline_counts:
+        return 0.0
+    counts = np.bincount(
+        np.digitize(live, np.asarray(interior_edges, dtype=float)),
+        minlength=len(baseline_counts),
+    )[: len(baseline_counts)]
+    return compute_js_from_histograms(baseline_counts, counts.tolist())
 
 
 # ── Public JS API ───────────────────────────────────────────────────────────
@@ -251,21 +288,7 @@ def compute_js_distance(
     if len(baseline_arr) == 0 or len(current_arr) == 0:
         return 0.0
 
-    # Shared bin edges spanning both distributions
-    combined = np.concatenate([baseline_arr, current_arr])
-    if np.ptp(combined) == 0:
-        return 0.0   # all identical values — no distance
-
-    edges = np.histogram_bin_edges(combined, bins=n_bins)
-
-    b_hist = np.histogram(baseline_arr, bins=edges)[0].astype(float)
-    c_hist = np.histogram(current_arr, bins=edges)[0].astype(float)
-
-    # Small additive smoothing so js is numerically stable
-    b_hist = (b_hist + 0.5) / (b_hist.sum() + 0.5 * n_bins)
-    c_hist = (c_hist + 0.5) / (c_hist.sum() + 0.5 * n_bins)
-
-    return float(jensenshannon(b_hist, c_hist))
+    return compute_js_from_quantile_edges(baseline_arr, current_arr, n_bins)
 
 
 def compute_ks_test(baseline: np.ndarray, current: np.ndarray) -> tuple[float, float]:
@@ -282,6 +305,42 @@ def compute_ks_test(baseline: np.ndarray, current: np.ndarray) -> tuple[float, f
         return 0.0, 1.0
     result = ks_2samp(b, c)
     return float(result.statistic), float(result.pvalue)
+
+
+def benjamini_hochberg(p_values: dict[str, float]) -> dict[str, float]:
+    """Return BH-adjusted p-values for one evaluation window."""
+    if not p_values:
+        return {}
+    ordered = sorted(p_values.items(), key=lambda item: item[1])
+    total = len(ordered)
+    adjusted: dict[str, float] = {}
+    running = 1.0
+    for rank in range(total, 0, -1):
+        name, p_value = ordered[rank - 1]
+        running = min(running, p_value * total / rank)
+        adjusted[name] = min(running, 1.0)
+    return adjusted
+
+
+def histogram_permutation_p(
+    baseline_counts: list[float],
+    current_counts: list[float],
+    n_resamples: int = 500,
+) -> float:
+    """Permutation p-value for two aligned bucket-count distributions."""
+    baseline = np.repeat(np.arange(len(baseline_counts)), np.asarray(baseline_counts, dtype=int))
+    current = np.repeat(np.arange(len(current_counts)), np.asarray(current_counts, dtype=int))
+    if len(baseline) < 2 or len(current) < 2:
+        return 1.0
+    observed = abs(float(np.mean(baseline)) - float(np.mean(current)))
+    pooled = np.concatenate([baseline, current])
+    rng = np.random.default_rng()
+    exceedances = 0
+    for _ in range(n_resamples):
+        shuffled = rng.permutation(pooled)
+        statistic = abs(float(np.mean(shuffled[: len(baseline)])) - float(np.mean(shuffled[len(baseline):])))
+        exceedances += statistic >= observed
+    return (exceedances + 1) / (n_resamples + 1)
 
 
 # ── Drift decision ──────────────────────────────────────────────────────────
@@ -369,10 +428,21 @@ def drift_decision(
 
     # ── 3. Sampling noise floor ─────────────────────────────────────────────
     if psi <= noise_floor:
+        noise_reason = (
+            f"PSI {psi:.3f} above warning {psi_warning:.2f} but within sampling noise "
+            f"(floor {noise_floor:.3f}, KS p={ks_p:.2f})"
+            if ks_p is not None
+            else (
+                f"PSI {psi:.3f} above warning {psi_warning:.2f} but within sampling noise "
+                f"(floor {noise_floor:.3f}, KS p=n/a)"
+            )
+        ) if psi >= psi_warning else (
+            f"PSI {psi:.4f} ≤ noise floor {noise_floor:.4f}; consistent with sampling variation."
+        )
         return DriftDecision(
             status="stable",
             confidence="high",
-            reason=f"PSI {psi:.4f} ≤ noise floor {noise_floor:.4f}; consistent with sampling variation.",
+            reason=noise_reason,
             psi=psi, js_distance=js_distance,
             noise_floor=noise_floor, n_live=n_live,
         )
@@ -397,7 +467,20 @@ def drift_decision(
     # ── 5. JS (and optional KS p-value) cross-check ────────────────────────
     # KS p-value, when available, can only *downgrade*: a non-significant KS
     # test (p > 0.05) means we lack evidence the CDFs differ.
-    ks_disagrees = ks_p is not None and ks_p > 0.05
+    if ks_p is not None and ks_p > settings.DRIFT_SIGNIFICANCE_ALPHA:
+        return DriftDecision(
+            status="stable",
+            confidence="low",
+            reason=(
+                f"PSI {psi:.3f} above warning {psi_warning:.2f} but KS p={ks_p:.2f} "
+                f"was not significant after correction and treated as within sampling noise "
+                f"(floor {noise_floor:.3f})."
+            ),
+            psi=psi, js_distance=js_distance,
+            noise_floor=noise_floor, n_live=n_live,
+        )
+
+    ks_disagrees = False
 
     if psi_status == "critical":
         js_agrees = js_distance >= js_critical and not ks_disagrees
@@ -479,6 +562,7 @@ def compute_health_score(
     weight_perf: float = 0.4,
     weight_alerts: float = 0.2,
     alert_penalty: float = 5.0,
+    drift_exponent: float = 1.0,
 ) -> HealthScore:
     """
     Compute a composite health score in [0, 100] with component breakdown.
@@ -504,8 +588,11 @@ def compute_health_score(
     alert_penalty        : points subtracted per open critical alert
     """
     # Keep all component values in [0, 1]. The public score remains [0, 100].
-    normalised_psi = min(max(avg_psi, 0.0) / max(psi_critical, 1e-9), 1.0)
-    drift_component = round(1.0 - normalised_psi, 4)
+    psi_ratio = max(avg_psi, 0.0) / max(psi_critical, 1e-9)
+    drift_component = round(
+        1.0 / (1.0 + psi_ratio ** max(drift_exponent, 1e-9)),
+        4,
+    )
     alert_component = round(
         max(0.0, 1.0 - (open_critical_alerts * alert_penalty / 100.0)), 4
     )

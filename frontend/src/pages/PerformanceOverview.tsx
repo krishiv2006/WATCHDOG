@@ -116,7 +116,7 @@ export default function PerformanceOverview() {
                     <TableCell className="font-semibold">{f1 !== undefined ? `${f1}%` : 'N/A'}</TableCell>
                     <TableCell>
                       <span className={`font-bold ${m.healthScore > 80 ? 'text-stable-text' : m.healthScore > 50 ? 'text-warning-text' : 'text-error'}`}>
-                        {m.healthScore}/100
+                        {m.healthScore == null ? 'No data yet' : `${m.healthScore}/100`}
                       </span>
                     </TableCell>
                   </TableRow>

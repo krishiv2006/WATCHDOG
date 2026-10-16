@@ -82,6 +82,45 @@ export const api = {
     })
   },
 
+  analyzeCsv: async (id: string, file: File, columns: {
+    predictionColumn?: string
+    actualColumn?: string
+    timestampColumn?: string
+  }) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (columns.predictionColumn) formData.append('prediction_column', columns.predictionColumn)
+    if (columns.actualColumn) formData.append('actual_column', columns.actualColumn)
+    if (columns.timestampColumn) formData.append('timestamp_column', columns.timestampColumn)
+    return fetchJson<{
+      status: string
+      rows_ingested: number
+      warnings: string[]
+      drifts: DriftScore[]
+      healthScore: number | null
+      perfStatus: string
+      performance: {
+        status: string
+        nLabeled: number
+        labelCoverage: number | null
+        accuracy: number | null
+        precision: number | null
+        recall: number | null
+        f1: number | null
+        mae: number | null
+        rmse: number | null
+        r2: number | null
+      }
+      n: number
+      minimum_required: number | null
+      duplicate: boolean
+    }>(`${BASE_URL}/models/${id}/analyze-csv`, {
+      method: 'POST',
+      body: formData,
+      headers: ingestHeaders(),
+    })
+  },
+
   getAlerts: async (params?: { status?: string; severity?: string; modelId?: string; page?: number; perPage?: number }) => {
     const query = new URLSearchParams()
     if (params?.status) query.set('status', params.status)
@@ -145,15 +184,18 @@ export const api = {
     })
   },
 
-  uploadBaseline: async (id: string, file: File) => {
+  uploadBaseline: async (id: string, file: File, targetColumn?: string) => {
     const formData = new FormData()
     formData.append('file', file)
+    if (targetColumn) formData.append('target_column', targetColumn)
     return fetchJson<{
       status: string
       baselineVersionId: string
       versionNumber: number
       featureCount: number
       sampleSize: number
+      targetColumn: string | null
+      predictionDistribution: Record<string, unknown> | null
       warnings: string[]
     }>(`${BASE_URL}/models/${id}/baseline`, {
       method: 'POST',

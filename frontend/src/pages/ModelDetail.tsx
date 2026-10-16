@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { RefreshCw, ArrowDown, Minus, Loader2 } from "lucide-react"
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { PerformanceHistoryChart } from "@/components/charts/PerformanceHistoryChart"
+import { AnalyzeCsvModal } from "@/components/modals/AnalyzeCsvModal"
 import type { Model, DriftScore } from "@/types"
 
 type DriftRow = Omit<DriftScore, 'status'> & {
@@ -27,6 +28,7 @@ export default function ModelDetail() {
     taskType: string | null
   } | null>(null)
   const [isReevaluating, setIsReevaluating] = useState(false)
+  const [isAnalyzeOpen, setIsAnalyzeOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -71,6 +73,12 @@ export default function ModelDetail() {
   if (error && !model) return <div className="p-10 text-error text-center">Unable to load model metrics: {error}</div>
   if (!model) return <div className="p-10 text-on-surface-variant text-center">Model data is unavailable.</div>
 
+  const healthTooltip = model.healthComponents
+    ? Object.entries(model.healthComponents)
+      .map(([name, component]) => `${name}: ${component.value == null ? 'awaiting labels' : `${component.value} (weight ${component.weight})`}`)
+      .join('\n')
+    : 'No health evaluation data yet'
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -86,13 +94,17 @@ export default function ModelDetail() {
         </div>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
-            <div className="relative h-14 w-14 flex items-center justify-center rounded-full border-[4px] border-stable-bg">
+            <div title={healthTooltip} className="relative h-14 w-14 flex items-center justify-center rounded-full border-[4px] border-stable-bg">
               <div className="absolute inset-0 rounded-full border-[4px] border-stable-text/80 transform -rotate-45" />
-              <span className="font-bold text-lg">{model.healthScore}</span>
+              <span className="font-bold text-lg">{model.healthScore ?? 'No data yet'}</span>
             </div>
           </div>
-          <Button onClick={handleReevaluate} disabled={isReevaluating}>
-            {isReevaluating ? (
+          <div className="flex gap-3">
+            <Button variant="outline" onClick={() => setIsAnalyzeOpen(true)}>
+              Analyze new data
+            </Button>
+            <Button onClick={handleReevaluate} disabled={isReevaluating}>
+              {isReevaluating ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Evaluating...
@@ -103,7 +115,8 @@ export default function ModelDetail() {
                 Re-evaluate
               </>
             )}
-          </Button>
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -248,24 +261,28 @@ export default function ModelDetail() {
               <CardTitle>Accuracy Degradation Over Time</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="h-72 min-h-72 w-full min-w-0">
-                {performance && (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={performance.timeSeries}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E0E3E5" />
-                      <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fill: '#40484C', fontSize: 12 }} />
-                      <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#40484C', fontSize: 12 }} />
-                      <Tooltip contentStyle={{ backgroundColor: '#191C1D', color: '#EFF1F2', borderRadius: '8px' }} />
-                      <Line type="monotone" dataKey="current" name="Current Accuracy" stroke="#B3261E" strokeWidth={2} dot={{ r: 4 }} />
-                      <Line type="monotone" dataKey="base" name="Baseline Accuracy" stroke="#70787D" strokeDasharray="5 5" strokeWidth={2} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
+              <PerformanceHistoryChart
+                modelId={id ?? ''}
+                history={(performance?.timeSeries ?? []).map((point) => ({
+                  time: point.time,
+                  accuracy: point.current,
+                  base: point.base,
+                }))}
+              />
             </CardContent>
           </Card>
         </TabsContent>
       </Tabs>
+      {id && (
+        <AnalyzeCsvModal
+          modelId={id}
+          isOpen={isAnalyzeOpen}
+          onClose={() => setIsAnalyzeOpen(false)}
+          onComplete={async () => {
+            await fetchData()
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -77,18 +77,21 @@ def client(db_engine):
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
-def _make_baseline_csv(n: int = 500, shift: float = 0.0) -> bytes:
+def _make_baseline_csv(n: int = 500, shift: float = 0.0, include_target: bool = False) -> bytes:
     """Generate a simple CSV with numeric features."""
     rng = np.random.default_rng(42)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["age", "income", "credit_score"])
+    writer.writerow(["age", "income", "credit_score"] + (["Outcome"] if include_target else []))
     for _ in range(n):
-        writer.writerow([
+        row = [
             round(float(rng.normal(35 + shift, 8)), 2),
             round(float(rng.normal(50000 + shift * 1000, 15000)), 2),
             round(float(rng.normal(700 + shift, 50)), 2),
-        ])
+        ]
+        if include_target:
+            row.append(int(rng.integers(0, 2)))
+        writer.writerow(row)
     return buf.getvalue().encode()
 
 
@@ -150,6 +153,39 @@ class TestModelCRUD:
 # ── Baseline upload ──────────────────────────────────────────────────────────
 
 class TestBaselineUpload:
+    def test_target_column_is_stored_as_prediction_distribution_and_excluded(self, client):
+        mid = _create_model(client)
+        csv_bytes = _make_baseline_csv(include_target=True)
+        resp = client.post(
+            f"/api/models/{mid}/baseline",
+            files={"file": ("baseline.csv", csv_bytes, "text/csv")},
+            data={"n_buckets": "10", "target_column": "Outcome"},
+        )
+        assert resp.status_code == 200, resp.text
+        result = resp.json()
+        assert result["featureCount"] == 3
+        assert result["targetColumn"] == "Outcome"
+        assert result["predictionDistribution"]["target_column"] == "Outcome"
+
+        db_session = next(client.app.dependency_overrides[get_db]())
+        baseline = db_session.query(BaselineVersion).filter(
+            BaselineVersion.model_id == mid
+        ).one()
+        assert len(baseline.feature_profiles) == 3
+        assert "Outcome" not in {p["name"] for p in baseline.feature_profiles}
+        target_distribution = baseline.prediction_distribution["distribution"]
+        assert target_distribution["histogram_counts"]
+        assert target_distribution["histogram_edges"]
+
+    def test_unknown_target_column_rejected(self, client):
+        mid = _create_model(client)
+        resp = client.post(
+            f"/api/models/{mid}/baseline",
+            files={"file": ("baseline.csv", _make_baseline_csv(), "text/csv")},
+            data={"target_column": "Outcome"},
+        )
+        assert resp.status_code == 400
+
     def test_upload_creates_baseline_version(self, client):
         mid = _create_model(client)
         result = _upload_baseline(client, mid)
@@ -319,6 +355,79 @@ class TestPredictionIngestion:
         assert response.status_code == 410
 
 
+class TestAnalyzeCSV:
+    def _csv(self, n=5, include_extra=False):
+        rows = ["age,income,credit_score,prediction,actual,timestamp" ]
+        for i in range(n):
+            rows.append(f"{30+i},50000,700,{i % 2},{i % 2},2026-01-01T00:0{i}:00")
+        if include_extra:
+            rows[0] = "age,income,credit_score,prediction,actual,timestamp,unexpected"
+            rows = [row + (",x" if index else "") for index, row in enumerate(rows)]
+        return "\n".join(rows).encode()
+
+    def _setup(self, client):
+        mid = _create_model(client)
+        _upload_baseline(client, mid, n=500)
+        return mid
+
+    def test_valid_file_ingests_and_returns_evaluation(self, client):
+        mid = self._setup(client)
+        response = client.post(
+            f"/api/models/{mid}/analyze-csv",
+            files={"file": ("live.csv", self._csv(30), "text/csv")},
+            data={"prediction_column": "prediction", "actual_column": "actual"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["rows_ingested"] == 30
+        assert data["nLabeled"] == 30
+        assert "drifts" in data
+        assert data["perfStatus"] in ("healthy", "degraded")
+
+    def test_missing_and_extra_columns_are_reported(self, client):
+        mid = self._setup(client)
+        csv_bytes = b"age,income,prediction\n30,50000,1\n"
+        response = client.post(
+            f"/api/models/{mid}/analyze-csv",
+            files={"file": ("live.csv", csv_bytes, "text/csv")},
+            data={"prediction_column": "prediction"},
+        )
+        assert response.status_code == 200
+        warnings = " ".join(response.json()["warnings"])
+        assert "credit_score" in warnings
+
+    def test_duplicate_file_is_not_ingested_twice(self, client):
+        mid = self._setup(client)
+        kwargs = {"files": {"file": ("live.csv", self._csv(5), "text/csv")}}
+        first = client.post(f"/api/models/{mid}/analyze-csv", **kwargs)
+        second = client.post(f"/api/models/{mid}/analyze-csv", **kwargs)
+        assert first.json()["rows_ingested"] == 5
+        assert second.json()["rows_ingested"] == 0
+        assert second.json()["duplicate"] is True
+
+    def test_too_few_rows_reports_insufficient_data(self, client):
+        mid = self._setup(client)
+        response = client.post(
+            f"/api/models/{mid}/analyze-csv",
+            files={"file": ("small.csv", self._csv(2), "text/csv")},
+        )
+        data = response.json()
+        assert data["status"] == "insufficient_data"
+        assert data["n"] == 2
+        assert data["minimum_required"] == get_settings().MIN_SAMPLE_SIZE
+
+    def test_file_without_labels_awaits_labels(self, client):
+        mid = self._setup(client)
+        csv_bytes = b"age,income,credit_score,prediction\n30,50000,700,1\n"
+        response = client.post(
+            f"/api/models/{mid}/analyze-csv",
+            files={"file": ("live.csv", csv_bytes, "text/csv")},
+            data={"prediction_column": "prediction"},
+        )
+        assert response.status_code == 200
+        assert response.json()["perfStatus"] == "awaiting_labels"
+
+
 # ── Ground truth ─────────────────────────────────────────────────────────────
 
 class TestGroundTruth:
@@ -361,6 +470,29 @@ class TestGroundTruth:
 # ── Drift endpoints ──────────────────────────────────────────────────────────
 
 class TestDriftEndpoints:
+    def test_evaluation_window_is_anchored_to_historical_predictions(self, client):
+        from datetime import datetime, timezone
+        from app.models import PredictionLog
+        mid = _create_model(client)
+        _upload_baseline(client, mid)
+        historical = datetime.now(timezone.utc) - timedelta(days=15)
+        db_session = next(client.app.dependency_overrides[get_db]())
+        for index in range(250):
+            db_session.add(PredictionLog(
+                model_id=mid,
+                prediction_id=f"historical-{index}",
+                timestamp=historical + timedelta(minutes=index),
+                feature_values={"age": 35.0 + index / 100, "income": 50000.0, "credit_score": 700.0},
+                predicted_value=1.0,
+            ))
+        db_session.commit()
+
+        response = client.post(f"/api/models/{mid}/reevaluate")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["nPredictions"] == 250
+        assert data["drifts"]
+
     def test_drift_empty_returns_list(self, client):
         mid = _create_model(client)
         resp = client.get(f"/api/models/{mid}/drift")
@@ -389,6 +521,7 @@ class TestDriftEndpoints:
         resp = client.post(f"/api/models/{mid}/reevaluate")
         assert resp.status_code == 200
         assert resp.json()["status"] == "no_predictions"
+        assert client.get(f"/api/models/{mid}").json()["healthScore"] is None
 
     def test_reevaluate_with_data_returns_completed(self, client):
         rng = np.random.default_rng(0)
@@ -566,6 +699,72 @@ class TestAlertLifecycle:
         assert data["total"] == 2   # unacknowledged + investigating
         statuses = {a["status"] for a in data["items"]}
         assert "resolved" not in statuses
+
+    def test_all_active_filter_returns_only_unresolved_alerts(self, client):
+        from app.models import Alert as AlertDB, utcnow
+
+        mid = _create_model(client)
+        db_session = next(client.app.dependency_overrides[get_db]())
+        for status in ("unacknowledged", "investigating", "resolved"):
+            db_session.add(AlertDB(
+                model_id=mid, severity="warning", category="data_quality",
+                title=f"{status} alert", status=status,
+                fingerprint=f"{mid}:all-active:{status}",
+                first_seen_at=utcnow(), last_seen_at=utcnow(), occurrences=1,
+            ))
+        db_session.commit()
+
+        response = client.get("/api/alerts?status=active")
+        assert response.status_code == 200
+        assert response.json()["total"] == 2
+        assert all(item["status"] != "resolved" for item in response.json()["items"])
+
+    def test_stable_drift_auto_resolves_open_alert_with_note(self, client):
+        from app.models import Alert as AlertDB, AlertRule, DriftScore, utcnow
+        from app.services.alerting import upsert_drift_alert
+
+        mid = _create_model(client)
+        db_session = next(client.app.dependency_overrides[get_db]())
+        alert = AlertDB(
+            model_id=mid,
+            severity="warning",
+            category="data_drift",
+            title="BloodPressure drift",
+            description="old score",
+            status="unacknowledged",
+            fingerprint=f"{mid}:data_drift:BloodPressure",
+            first_seen_at=utcnow(),
+            last_seen_at=utcnow(),
+            occurrences=1,
+        )
+        db_session.add(alert)
+        db_session.add(DriftScore(
+            model_id=mid,
+            feature_name="BloodPressure",
+            timestamp=utcnow(),
+            psi_score=0.02,
+            js_distance=0.01,
+            n_live=300,
+            n_baseline=460,
+            status="stable",
+        ))
+        db_session.add(AlertRule(
+            model_id=mid,
+            metric="psi",
+            threshold_warning=0.1,
+            threshold_critical=0.25,
+            consecutive_windows=1,
+        ))
+        db_session.commit()
+
+        upsert_drift_alert(
+            db_session, mid, "Diabetes Classifier v1", "BloodPressure",
+            "stable", 0.02, 0.01, 300, "Stable", None, None,
+        )
+        db_session.refresh(alert)
+        assert alert.status == "resolved"
+        assert alert.auto_resolved is True
+        assert "returned to Stable" in alert.description
 
     def test_patch_nonexistent_alert_404(self, client):
         resp = client.patch("/api/alerts/no-such-id", json={"status": "resolved"})

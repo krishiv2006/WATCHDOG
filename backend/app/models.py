@@ -52,7 +52,8 @@ class Model(Base):
     retired_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     last_evaluated_at = Column(DateTime(timezone=True), nullable=True)
-    health_score = Column(Float, default=100.0)
+    health_score = Column(Float, nullable=True, default=None)
+    health_components = Column(JSON, nullable=True, default=None)
     training_data_ref = Column(String(255), nullable=True)
 
     # Relationships
@@ -171,6 +172,23 @@ class PredictionLog(Base):
         Index("ix_pred_model_timestamp", "model_id", "timestamp"),
         Index("ix_pred_model_predid", "model_id", "prediction_id"),
         UniqueConstraint("model_id", "prediction_id", name="uq_pred_model_prediction_id"),
+    )
+
+
+class AnalyzeCSVUpload(Base):
+    """Idempotency ledger and cached result for analyze-csv uploads."""
+
+    __tablename__ = "analyze_csv_uploads"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    model_id = Column(String, ForeignKey("models.id"), nullable=False)
+    file_hash = Column(String(64), nullable=False)
+    result = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("model_id", "file_hash", name="uq_analyze_csv_model_hash"),
+        Index("ix_analyze_csv_model", "model_id"),
     )
 
 

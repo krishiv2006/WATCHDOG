@@ -22,7 +22,7 @@ from app.config import get_settings
 from app.deps import require_ingest_key
 from app.models import (
     Model as ModelDB, ModelBaseline, BaselineVersion, PredictionLog,
-    DriftScore, PerformanceSnapshot, Alert as AlertDB, AlertRule,
+    AnalyzeCSVUpload, DriftScore, PerformanceSnapshot, Alert as AlertDB, AlertRule,
     utcnow,
 )
 from app.schemas import (
@@ -34,6 +34,7 @@ from app.services.drift import (
     compute_js_from_histograms, compute_ks_test,
     drift_decision, compute_health_score, psi_to_status,
 )
+from app.services.evaluate import prediction_window
 from app.ws_manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ def list_models(db: Session = Depends(get_db)):
             "taskType": m.task_type,
             "predictionsCount": pred_count,
             "healthScore": m.health_score,
+            "healthComponents": m.health_components,
             "driftStatus": _drift_status_label(m.id, db),
             "lastUpdated": _format_time_ago(m.last_evaluated_at),
         })
@@ -174,15 +176,14 @@ def get_model(model_id: str, db: Session = Depends(get_db)):
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    pred_count = (
-        db.query(func.count(PredictionLog.id))
-        .filter(
-            PredictionLog.model_id == model_id,
-            PredictionLog.timestamp >= _now_utc() - timedelta(days=7),
+    cutoff, window_end = prediction_window(db, model_id, 7 * 24)
+    pred_query = db.query(func.count(PredictionLog.id)).filter(PredictionLog.model_id == model_id)
+    if cutoff is not None and window_end is not None:
+        pred_query = pred_query.filter(
+            PredictionLog.timestamp >= cutoff,
+            PredictionLog.timestamp <= window_end,
         )
-        .scalar()
-        or 0
-    )
+    pred_count = pred_query.scalar() or 0
 
     baseline = _get_active_baseline(model_id, db)
 
@@ -196,6 +197,7 @@ def get_model(model_id: str, db: Session = Depends(get_db)):
         "taskType": model.task_type,
         "predictionsCount": pred_count,
         "healthScore": model.health_score,
+        "healthComponents": model.health_components,
         "driftStatus": _drift_status_label(model_id, db),
         "lastUpdated": _format_time_ago(model.last_evaluated_at),
         "trainingDataRef": model.training_data_ref,
@@ -336,6 +338,7 @@ async def upload_baseline(
     model_id: str,
     file: UploadFile = File(...),
     n_buckets: int = Form(10),
+    target_column: str | None = Form(None),
     db: Session = Depends(get_db),
     _: None = Depends(require_ingest_key),
 ):
@@ -363,6 +366,16 @@ async def upload_baseline(
     if len(df) == 0:
         raise HTTPException(status_code=400, detail="CSV is empty")
 
+    if target_column is not None:
+        target_column = target_column.strip()
+        if not target_column:
+            target_column = None
+        elif target_column not in df.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target column '{target_column}' was not found in CSV",
+            )
+
     # Identify feature columns (exclude obvious non-features)
     exclude_lower = {
         "id", "predicted_value", "actual_value", "target", "label",
@@ -371,8 +384,14 @@ async def upload_baseline(
     }
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = df.select_dtypes(include=["object", "bool", "category", "string"]).columns.tolist()
-    feature_cols = [c for c in numeric_cols if c.lower() not in exclude_lower]
-    cat_feature_cols = [c for c in cat_cols if c.lower() not in exclude_lower]
+    feature_cols = [
+        c for c in numeric_cols
+        if c.lower() not in exclude_lower and c != target_column
+    ]
+    cat_feature_cols = [
+        c for c in cat_cols
+        if c.lower() not in exclude_lower and c != target_column
+    ]
 
     if not feature_cols and not cat_feature_cols:
         raise HTTPException(status_code=400, detail="No feature columns found in CSV")
@@ -410,6 +429,23 @@ async def upload_baseline(
 
     perf_metrics = None
     pred_dist = None
+    if target_column is not None:
+        target_series = df[target_column]
+        if pd.api.types.is_numeric_dtype(target_series):
+            target_profile = _build_feature_profile(
+                target_column,
+                target_series.to_numpy(dtype=float),
+                n_buckets,
+            )
+        else:
+            target_profile = _build_categorical_profile(target_column, target_series)
+        pred_dist = {
+            "target_column": target_column,
+            "type": target_profile["type"],
+            "count": target_profile["count"],
+            "null_rate": target_profile["null_rate"],
+            "distribution": target_profile,
+        }
 
     # Deactivate previous baseline versions
     db.query(BaselineVersion).filter(
@@ -457,12 +493,26 @@ async def upload_baseline(
     db.commit()
     db.refresh(baseline)
 
+    if target_column:
+        from app.services.alerting import auto_resolve_alert
+
+        model_name = f"{model.name} {model.version}"
+        auto_resolve_alert(
+            db, model_id, f"{model_id}:data_quality:null:{target_column}", model_name
+        )
+        auto_resolve_alert(
+            db, model_id, f"{model_id}:data_drift:{target_column}", model_name
+        )
+        db.commit()
+
     return {
         "status": "success",
         "baselineVersionId": baseline.id,
         "versionNumber": baseline.version_number,
         "featureCount": len(profiles),
         "sampleSize": len(df),
+        "targetColumn": target_column,
+        "predictionDistribution": pred_dist,
         "performanceMetrics": perf_metrics,
         "warnings": warnings_list,
     }
@@ -592,6 +642,145 @@ def ingest_predictions(
         "duplicates": duplicates,
         "warnings": warnings_list,
     }
+
+
+@router.post("/models/{model_id}/analyze-csv")
+async def analyze_csv(
+    model_id: str,
+    file: UploadFile = File(...),
+    prediction_column: str | None = Form(None),
+    actual_column: str | None = Form(None),
+    timestamp_column: str | None = Form(None),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_ingest_key),
+):
+    """Ingest a CSV of production rows and immediately evaluate the model."""
+    model = db.query(ModelDB).filter(ModelDB.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    baseline = _get_active_baseline(model_id, db)
+    if not baseline:
+        raise HTTPException(status_code=400, detail="Upload an active baseline before analyzing new data")
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    content = await file.read()
+    if len(content) > settings.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max {settings.MAX_UPLOAD_BYTES} bytes)")
+    file_hash = hashlib.sha256(content).hexdigest()
+    prior = db.query(AnalyzeCSVUpload).filter(
+        AnalyzeCSVUpload.model_id == model_id,
+        AnalyzeCSVUpload.file_hash == file_hash,
+    ).first()
+    if prior:
+        return {**prior.result, "duplicate": True, "rows_ingested": 0}
+
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+    if len(df) == 0:
+        raise HTTPException(status_code=400, detail="CSV is empty")
+
+    def clean_column(value: str | None) -> str | None:
+        value = value.strip() if value else None
+        return value or None
+
+    prediction_column = clean_column(prediction_column)
+    actual_column = clean_column(actual_column)
+    timestamp_column = clean_column(timestamp_column)
+    selected_columns = {
+        name for name in (prediction_column, actual_column, timestamp_column) if name
+    }
+    missing_selected = sorted(name for name in selected_columns if name not in df.columns)
+    if missing_selected:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Selected column(s) not found in CSV", "columns": missing_selected},
+        )
+
+    feature_names = {profile["name"] for profile in baseline.feature_profiles or []}
+    ignored_names = selected_columns
+    csv_features = set(df.columns) - ignored_names
+    missing_features = sorted(feature_names - csv_features)
+    extra_features = sorted(csv_features - feature_names)
+    warnings_list = []
+    if missing_features:
+        warnings_list.append(f"Missing baseline feature columns: {', '.join(missing_features)}")
+    if extra_features:
+        warnings_list.append(f"Extra CSV columns ignored: {', '.join(extra_features)}")
+
+    from app.models import generate_uuid
+    now = _now_utc()
+    records = []
+    for _, row in df.iterrows():
+        features = {}
+        for name in feature_names:
+            if name in df.columns:
+                value = row[name]
+                features[name] = None if pd.isna(value) else value.item() if hasattr(value, "item") else value
+        timestamp = now
+        if timestamp_column:
+            raw_timestamp = row[timestamp_column]
+            if not pd.isna(raw_timestamp):
+                try:
+                    timestamp = pd.to_datetime(raw_timestamp).to_pydatetime()
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    warnings_list.append(f"Invalid values in timestamp column '{timestamp_column}'; using ingestion time")
+        prediction = None
+        actual = None
+        if prediction_column and not pd.isna(row[prediction_column]):
+            prediction = float(row[prediction_column])
+        if prediction_column and actual_column and not pd.isna(row[actual_column]):
+            actual = float(row[actual_column])
+        records.append(PredictionLog(
+            model_id=model_id,
+            prediction_id=generate_uuid(),
+            timestamp=timestamp,
+            feature_values=features,
+            predicted_value=prediction,
+            actual_value=actual,
+            labeled_at=now if actual is not None else None,
+        ))
+
+    db.bulk_save_objects(records)
+    db.commit()
+    from app.services.evaluate import evaluate_model
+    evaluation = evaluate_model(model, db)
+    latest_snapshot = (
+        db.query(PerformanceSnapshot)
+        .filter(PerformanceSnapshot.model_id == model_id)
+        .order_by(PerformanceSnapshot.timestamp.desc())
+        .first()
+    )
+    performance = {
+        "status": latest_snapshot.perf_status if latest_snapshot else "awaiting_labels",
+        "nLabeled": latest_snapshot.n_labeled if latest_snapshot else 0,
+        "labelCoverage": latest_snapshot.label_coverage if latest_snapshot else None,
+        "accuracy": latest_snapshot.accuracy if latest_snapshot else None,
+        "precision": latest_snapshot.precision_score if latest_snapshot else None,
+        "recall": latest_snapshot.recall if latest_snapshot else None,
+        "f1": latest_snapshot.f1 if latest_snapshot else None,
+        "mae": latest_snapshot.mae if latest_snapshot else None,
+        "rmse": latest_snapshot.rmse if latest_snapshot else None,
+        "r2": latest_snapshot.r_squared if latest_snapshot else None,
+    }
+    result = {
+        **evaluation,
+        "status": "insufficient_data" if len(df) < settings.MIN_SAMPLE_SIZE else evaluation["status"],
+        "rows_ingested": len(records),
+        "warnings": warnings_list,
+        "minimum_required": settings.MIN_SAMPLE_SIZE if len(df) < settings.MIN_SAMPLE_SIZE else None,
+        "n": len(df),
+        "duplicate": False,
+        "performance": performance,
+    }
+    ledger = AnalyzeCSVUpload(model_id=model_id, file_hash=file_hash, result=result)
+    db.add(ledger)
+    db.commit()
+    return result
 
 
 # ── Ground truth ingestion (Section C.3) ────────────────────────────────────

@@ -179,9 +179,16 @@ export default function DriftAnalysis({ onOpenRegister }: { onOpenRegister?: () 
                     <TableCell className="font-mono text-on-surface-variant">{row.jsDistance != null ? Number(row.jsDistance).toFixed(4) : 'N/A'}</TableCell>
                     <TableCell>{row.nLive != null ? row.nLive.toLocaleString() : '—'}</TableCell>
                     <TableCell>
-                      <Badge variant={row.status as any} className="uppercase leading-none py-1 text-[10px]">
-                        {row.status}
-                      </Badge>
+                      <div className="space-y-1">
+                        <Badge variant={row.status as any} className="uppercase leading-none py-1 text-[10px]">
+                          {row.status}
+                        </Badge>
+                        {row.reason && (
+                          <div className="max-w-xs text-[11px] leading-4 text-on-surface-variant">
+                            {row.reason}
+                          </div>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))

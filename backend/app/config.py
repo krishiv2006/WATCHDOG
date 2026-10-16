@@ -14,14 +14,19 @@ class Settings(BaseSettings):
     HEALTH_WEIGHT_PERFORMANCE: float = 0.4
     HEALTH_WEIGHT_ALERTS: float = 0.2
     HEALTH_ALERT_PENALTY: float = 5.0  # points subtracted per open critical alert
+    HEALTH_DRIFT_EXPONENT: float = 1.0
 
     # PSI thresholds (default; per-model AlertRule rows override these)
     PSI_THRESHOLD_WARNING: float = 0.1
     PSI_THRESHOLD_CRITICAL: float = 0.25
 
     # Jensen-Shannon distance thresholds (used in drift_decision cross-check)
-    JS_THRESHOLD_WARNING: float = 0.05
-    JS_THRESHOLD_CRITICAL: float = 0.15
+    # Calibrated from 250-sample stable resampling with PSI quantile buckets.
+    JS_THRESHOLD_WARNING: float = 0.11
+    JS_THRESHOLD_CRITICAL: float = 0.125
+    JS_SMOOTHING_COUNT: float = 10.0
+    DRIFT_SIGNIFICANCE_ALPHA: float = 0.05
+    DRIFT_PERMUTATION_RESAMPLES: int = 500
 
     # Minimum live-sample size below which status is "insufficient_data"
     # rather than stable/warning/critical (prevents false alarms on tiny batches)
@@ -35,6 +40,9 @@ class Settings(BaseSettings):
 
     # Live-window length used when scoring a model against its baseline
     EVAL_WINDOW_HOURS: int = 24
+    VOLUME_LOOKBACK_WINDOWS: int = 14
+    VOLUME_MIN_HISTORY_WINDOWS: int = 7
+    VOLUME_ANOMALY_FACTOR: float = 3.0
 
     # Minimum labelled predictions required before reporting performance
     MIN_LABELS: int = 30

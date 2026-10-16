@@ -269,10 +269,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [isAccountOpen, setIsAccountOpen] = useState(false)
 
   const fetchAlerts = () => {
-    api.getAlerts({ perPage: 10 }).then(res => {
+    api.getAlerts({ status: 'active', perPage: 10 }).then(res => {
       setRecentAlerts(res.items)
-      const unack = res.items.filter(a => a.status === 'unacknowledged').length
-      setUnacknowledgedCount(unack)
+      setUnacknowledgedCount(res.total)
     }).catch(() => {})
   }
 
@@ -281,7 +280,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     const disconnect = connectAlertsWebSocket(() => {
       fetchAlerts()
     })
-    return disconnect
+    const handler = () => fetchAlerts()
+    window.addEventListener('model-data-invalidated', handler)
+    return () => {
+      disconnect()
+      window.removeEventListener('model-data-invalidated', handler)
+    }
   }, [])
 
   useEffect(() => {

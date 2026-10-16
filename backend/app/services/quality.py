@@ -10,6 +10,9 @@ from sqlalchemy import func
 
 from app.models import BaselineVersion, PredictionLog
 from app.models import utcnow
+from app.config import get_settings
+
+settings = get_settings()
 
 
 def schema_warnings(
@@ -19,15 +22,20 @@ def schema_warnings(
     """Unknown / missing features relative to the active baseline profile."""
     if not baseline or not baseline.feature_profiles:
         return []
-    expected = {p["name"] for p in baseline.feature_profiles}
+    target_column = (
+        (baseline.prediction_distribution or {}).get("target_column")
+        if baseline.prediction_distribution
+        else None
+    )
+    expected = {
+        p["name"] for p in baseline.feature_profiles
+        if p["name"] != target_column
+    }
     incoming = set(features.keys())
     warnings = []
     missing = expected - incoming
-    extra = incoming - expected
     if missing:
         warnings.append(f"missing features: {sorted(missing)[:8]}")
-    if extra:
-        warnings.append(f"unknown features: {sorted(extra)[:8]}")
     return warnings
 
 
@@ -35,18 +43,30 @@ def volume_anomaly(
     db: Session,
     model_id: str,
     window_hours: int = 24,
-    lookback_windows: int = 7,
-    factor: float = 3.0,
+    lookback_windows: int | None = None,
+    factor: float | None = None,
 ) -> dict | None:
     """Compare last-window prediction count to the rolling mean of prior windows.
 
     Returns a dict with current/expected counts when the drop or spike exceeds
     ``factor`` times (or is below 1/factor of) the rolling average.
     """
-    now = utcnow()
+    lookback_windows = lookback_windows or settings.VOLUME_LOOKBACK_WINDOWS
+    factor = factor or settings.VOLUME_ANOMALY_FACTOR
+    latest = (
+        db.query(PredictionLog.timestamp)
+        .filter(PredictionLog.model_id == model_id)
+        .order_by(PredictionLog.timestamp.desc())
+        .first()
+    )
+    if not latest or latest[0] is None:
+        return None
+    now = latest[0]
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=utcnow().tzinfo)
     window = timedelta(hours=window_hours)
     current = (
-        db.query(func.count(PredictionLog.id))
+        db.query(func.count(func.distinct(PredictionLog.prediction_id)))
         .filter(
             PredictionLog.model_id == model_id,
             PredictionLog.timestamp >= now - window,
@@ -59,7 +79,7 @@ def volume_anomaly(
         start = now - window * (i + 1)
         end = now - window * i
         c = (
-            db.query(func.count(PredictionLog.id))
+            db.query(func.count(func.distinct(PredictionLog.prediction_id)))
             .filter(
                 PredictionLog.model_id == model_id,
                 PredictionLog.timestamp >= start,
@@ -69,11 +89,9 @@ def volume_anomaly(
             or 0
         )
         prior_counts.append(c)
-    if not prior_counts or sum(prior_counts) == 0:
+    if sum(count > 0 for count in prior_counts) < settings.VOLUME_MIN_HISTORY_WINDOWS:
         return None
     avg = sum(prior_counts) / len(prior_counts)
-    if avg < 10:
-        return None  # not enough history to call this an anomaly
     if current > avg * factor or current < avg / factor:
         return {
             "current": int(current),
@@ -105,8 +123,15 @@ def feature_null_spikes(
     if not predictions or not baseline.feature_profiles:
         return []
     spikes = []
+    target_column = (
+        (baseline.prediction_distribution or {}).get("target_column")
+        if baseline.prediction_distribution
+        else None
+    )
     for profile in baseline.feature_profiles:
         name = profile["name"]
+        if name == target_column:
+            continue
         base_null = float(profile.get("null_rate") or 0)
         n = 0
         nulls = 0
@@ -116,7 +141,10 @@ def feature_null_spikes(
             if name not in fv or fv[name] is None:
                 nulls += 1
         live_null = nulls / n if n else 0.0
-        if live_null - base_null >= spike_delta:
+        if (
+            live_null - base_null >= spike_delta
+            and not (target_column is None and base_null == 0 and live_null == 1.0)
+        ):
             spikes.append({
                 "feature": name,
                 "baselineNullRate": round(base_null, 4),
